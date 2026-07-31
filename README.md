@@ -2,8 +2,6 @@
 
 Local-first code explorer. Point it at a project, search a symbol, expand callers and callees.
 
-No cloud. No AI. No IDE required.
-
 ## Install
 
 ```bash
