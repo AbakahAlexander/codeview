@@ -170,7 +170,7 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
         if not service.store:
             raise HTTPException(status_code=400, detail="No index loaded")
         try:
-            relations, total = service.expand(body.symbol_id, body.kind, limit=500)
+            relations, total = service.expand(body.symbol_id, body.kind, limit=80)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:

@@ -337,8 +337,15 @@ class ExplorerService:
                 store.mark_expanded(symbol_id, relation_kind)
                 return store.relations_enriched(symbol_id, relation_kind, limit=limit)
 
-            # Precomputed edges are a cache seed only. Always re-expand call neighborhoods
-            # so ambiguous same-name candidates are not silently omitted from the UI.
+            # Use precomputed call graph when available — keep expands instant.
+            if (
+                relation_kind in PRECOMPUTED_CALL_KINDS
+                and symbol.language in precomputed_langs
+                and store.get_meta("calls_indexed") == "1"
+            ):
+                store.mark_expanded(symbol_id, relation_kind)
+                return store.relations_enriched(symbol_id, relation_kind, limit=limit)
+
             if relation_kind not in LAZY_KINDS:
                 store.mark_expanded(symbol_id, relation_kind)
                 return store.relations_enriched(symbol_id, relation_kind, limit=limit)
@@ -355,19 +362,9 @@ class ExplorerService:
 
             root = Path(store.get_meta("root") or ".")
             provider = self.provider_for_symbol(symbol)
-            symbols_by_id = {s.id: s for s in store.search(symbol.name, limit=2000)}
+            symbols_by_id = {s.id: s for s in store.search(symbol.name, limit=500)}
             for s in store.symbols_in_path(symbol.location.path):
                 symbols_by_id[s.id] = s
-            # Call expands need every same-name candidate visible to learners.
-            if relation_kind in PRECOMPUTED_CALL_KINDS and store.get_meta("index_mode") != "lazy":
-                for s in store.all_symbols():
-                    if s.kind in {
-                        SymbolKind.METHOD,
-                        SymbolKind.FUNCTION,
-                        SymbolKind.CLASS,
-                        SymbolKind.INTERFACE,
-                    }:
-                        symbols_by_id[s.id] = s
             symbols_by_id[symbol.id] = symbol
 
             relations = provider.expand(root, symbol, relation_kind, symbols_by_id)

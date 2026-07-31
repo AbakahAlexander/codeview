@@ -7,34 +7,23 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <header class="bar">
-    <a class="brand" href="#/">Codeview</a>
+  <div class="bar">
+    <strong>Codeview</strong>
     <span id="status"></span>
-    <input id="filter" type="search" placeholder="Search symbols…" autocomplete="off" />
-    <button type="button" id="back" title="Back">←</button>
-    <button type="button" id="forward" title="Forward">→</button>
-  </header>
-  <main class="layout">
-    <aside class="list-pane">
-      <div id="listMeta" class="pane-meta"></div>
-      <ul id="results" class="results"></ul>
-    </aside>
-    <section class="explore-pane">
-      <div id="exploreEmpty" class="empty-state">Search for a symbol to explore its neighborhood.</div>
-      <article id="explore" class="explore" hidden>
-        <header class="explore-head">
-          <h1 id="symName"></h1>
-          <div id="symMeta" class="sym-meta"></div>
-        </header>
-        <section class="block">
-          <h2>Definition</h2>
-          <div id="srcMeta" class="src-meta"></div>
-          <pre id="src"><code></code></pre>
-        </section>
-        <div id="sections"></div>
-      </article>
-    </section>
-  </main>
+    <input id="filter" type="search" placeholder="search symbols…" />
+    <button type="button" id="back">←</button>
+    <button type="button" id="forward">→</button>
+    <span id="crumbs"></span>
+  </div>
+  <div class="layout">
+    <div class="tree-pane">
+      <ul id="tree" class="tree"></ul>
+    </div>
+    <div class="src-pane">
+      <div id="srcMeta" class="src-meta"></div>
+      <pre id="src"><code></code></pre>
+    </div>
+  </div>
   <script src="/static/app.js"></script>
 </body>
 </html>

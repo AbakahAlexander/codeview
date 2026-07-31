@@ -52,7 +52,8 @@ codeview serve . --provider scip
 - Localhost only — nothing is uploaded
 - The **graph is an implementation detail**; the product is expandable exploration
 - Providers implement a shared adapter (`index`, `expand`, `source_for`, plus helpers like `get_callers` / `get_references`)
-- Heuristic callers/callees show **all same-name candidates** rather than silently dropping ambiguous edges
+- Heuristic callers/callees are approximate (name-based); prefer SCIP when you need precision
+- The UI is a plain expandable tree (`+` / `−`) — fast, no heavy graph chrome
 
 ## Layout
 
