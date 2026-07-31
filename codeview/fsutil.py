@@ -216,22 +216,25 @@ def rg_files(root: Path, query: str, globs: list[str], limit: int = 40) -> list[
 
 def _line_looks_like_definition(line: str, name: str) -> bool:
     """True for `def name(`, `fn name(`, etc. — not real call sites."""
-    return bool(
-        re.search(
-            rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
-            rf"(?:def|fn|fun|function|func|method)\s+{re.escape(name)}\s*\(",
-            line,
-        )
-    ) or bool(
-        # C/Java-style: type ... name( at start of a declaration-ish line without a prior call.
-        # Keep conservative: only skip when the name( is the declarator after common keywords.
-        re.search(
-            rf"(?m)^\s*(?:public|private|protected|static|final|inline|virtual|override|export|async)?\s*"
-            rf"(?:[\w:<>\*\&\s]+)?\b{re.escape(name)}\s*\([^;]*\)\s*(?:\{{|:)?\s*$",
-            line,
-        )
-        and not re.search(r"\b(?:return|if|while|for|switch|case|throw|yield|await|new)\b", line)
-    )
+    text = line.strip()
+    # Python / JS / Rust style function definitions.
+    if re.match(
+        rf"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+        rf"(?:def|fn|fun|function|func)\s+{re.escape(name)}\s*\(",
+        text,
+    ):
+        return True
+    # Skip if this is clearly a call/control keyword before the name.
+    if re.match(rf"(?:return|await|yield|raise|if|while|for|assert)\b", text):
+        return False
+    # C/Java-ish method declarator: ends with ){ or ): or ); and has a type token before name.
+    if re.search(
+        rf"\b(?:void|int|long|bool|boolean|string|String|float|double|auto|char|short|"
+        rf"public|private|protected|static|final|override|virtual|unsigned)\b",
+        text,
+    ) and re.search(rf"\b{re.escape(name)}\s*\([^;]*\)\s*(\{{|:)?\s*$", text):
+        return True
+    return False
 
 
 def rg_call_sites(root: Path, name: str, globs: list[str], limit: int = 80) -> list[tuple[str, int]]:
