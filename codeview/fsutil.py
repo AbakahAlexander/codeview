@@ -179,20 +179,9 @@ def count_source_files(root: Path, extensions: set[str], limit: int = 5_000_000)
 
 
 def _rg_bin() -> str:
-    import shutil
+    from codeview.rgutil import ensure_rg
 
-    found = shutil.which("rg")
-    if found:
-        return found
-    candidates = [
-        Path.home() / ".cargo/bin/rg",
-        Path("/usr/share/cursor/resources/app/node_modules/@vscode/ripgrep/bin/rg"),
-        Path("/usr/bin/rg"),
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
-    return "rg"
+    return ensure_rg()
 
 
 def rg_files(root: Path, query: str, globs: list[str], limit: int = 40) -> list[str]:

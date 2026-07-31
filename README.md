@@ -16,7 +16,8 @@ uvx --from git+https://github.com/AbakahAlexander/codeview@main codeview --help
 pipx install 'git+https://github.com/AbakahAlexander/codeview.git'
 ```
 
-Requires Python 3.10+, `git`, and [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) when using heuristic providers.
+Requires Python 3.10+ and `git`. **ripgrep is fetched automatically** on first
+use into `~/.codeview/bin` (or reused from PATH if already installed).
 
 ## Quick start
 

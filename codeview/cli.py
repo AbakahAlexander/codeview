@@ -76,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("providers", help="List available graph providers")
 
+    doctor_p = sub.add_parser("doctor", help="Check / fetch runtime tools (e.g. ripgrep)")
+    doctor_p.add_argument(
+        "--fetch-rg",
+        action="store_true",
+        help="Force download of a ripgrep binary into ~/.codeview/bin",
+    )
+
     search_p = sub.add_parser("search", help="Search symbols in an index")
     search_p.add_argument("query")
     search_p.add_argument("--db", type=Path, required=True)
@@ -90,6 +97,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "providers":
         print(json.dumps(list_providers(), indent=2))
+        return 0
+
+    if args.command == "doctor":
+        from codeview.rgutil import ensure_rg
+
+        try:
+            rg = ensure_rg(force_download=bool(args.fetch_rg))
+        except Exception as exc:
+            print(f"ripgrep: ERROR {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"rg": rg, "ok": True}, indent=2))
         return 0
 
     if args.command == "index":
