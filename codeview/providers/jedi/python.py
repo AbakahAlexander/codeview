@@ -8,27 +8,9 @@ from typing import Iterable
 import jedi
 from jedi.api.classes import Name
 
+from codeview.fsutil import SKIP_DIR_NAMES as SKIP_DIRS
 from codeview.models import Location, Relation, RelationKind, SourceSnippet, Symbol, SymbolKind
 from codeview.providers.base import GraphProvider
-
-SKIP_DIRS = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".venv",
-    "venv",
-    "env",
-    "__pycache__",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".tox",
-    "node_modules",
-    "dist",
-    "build",
-    ".eggs",
-    ".indexes",
-}
 
 
 def _stable_id(*parts: object) -> str:

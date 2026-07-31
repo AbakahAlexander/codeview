@@ -8,22 +8,9 @@ from typing import Iterable
 from tree_sitter import Language, Node, Parser, Query, QueryCursor
 import tree_sitter_java as tsjava
 
+from codeview.fsutil import SKIP_DIR_NAMES as SKIP_DIRS
 from codeview.models import Location, Relation, RelationKind, SourceSnippet, Symbol, SymbolKind
 from codeview.providers.base import GraphProvider
-
-SKIP_DIRS = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".gradle",
-    "build",
-    "out",
-    "bin",
-    "target",
-    "node_modules",
-    ".indexes",
-    "__pycache__",
-}
 
 SYMBOL_QUERY = """
 (class_declaration
