@@ -8,7 +8,7 @@ from typing import Iterable
 import jedi
 from jedi.api.classes import Name
 
-from codeview.fsutil import path_is_skipped
+from codeview.fsutil import path_is_skipped, rg_call_sites
 from codeview.models import Location, Relation, RelationKind, SourceSnippet, Symbol, SymbolKind
 from codeview.providers.base import GraphProvider
 
@@ -601,35 +601,28 @@ class JediPythonProvider(GraphProvider):
         symbol: Symbol,
         symbols_by_id: dict[str, Symbol],
     ) -> list[Relation]:
+        """Find callers via ripgrep, then resolve enclosing symbols in hit files only."""
         relations: list[Relation] = []
         seen: set[tuple[str, int]] = set()
-
-        for path in _iter_python_files(root):
-            rel_path = _rel(root, path)
-            source = _read_text(path)
-            try:
-                tree = ast.parse(source, filename=rel_path)
-            except SyntaxError:
+        hits = rg_call_sites(root, symbol.name, ["*.py"], limit=200)
+        # Group hits by file so we parse each file at most once.
+        by_file: dict[str, list[int]] = {}
+        for rel_path, line in hits:
+            if path_is_skipped(root / rel_path):
                 continue
+            if rel_path == symbol.location.path and line == symbol.location.line:
+                continue
+            by_file.setdefault(rel_path, []).append(line)
 
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                call_name, col = self._call_locator(node)
-                if call_name != symbol.name:
-                    continue
-                line = getattr(node, "lineno", None)
-                if line is None:
-                    continue
-                column = col if col is not None else getattr(node, "col_offset", 0)
-
-                # Skip the definition line itself.
-                if rel_path == symbol.location.path and line == symbol.location.line:
-                    continue
-
-                if not self._same_definition(root, rel_path, line, column, symbol):
-                    continue
-
+        for rel_path, lines in by_file.items():
+            # Ensure we have symbols for this file to resolve enclosing functions.
+            file_syms = [s for s in symbols_by_id.values() if s.location.path == rel_path]
+            if not file_syms:
+                parsed, _ = self.parse_file(root, rel_path)
+                self.pending_symbols.extend(parsed)
+                for s in parsed:
+                    symbols_by_id[s.id] = s
+            for line in lines:
                 caller = self._enclosing_symbol(rel_path, line, symbols_by_id)
                 if not caller or caller.id == symbol.id:
                     continue
@@ -642,7 +635,7 @@ class JediPythonProvider(GraphProvider):
                         kind=RelationKind.CALLED_BY,
                         from_id=symbol.id,
                         to_id=caller.id,
-                        location=Location(path=rel_path, line=line, column=column),
+                        location=Location(path=rel_path, line=line, column=0),
                     )
                 )
         return relations
@@ -737,9 +730,10 @@ class JediPythonProvider(GraphProvider):
         if target_node is None:
             return []
 
-        script = self._script(root, symbol.location.path)
-        if not script:
-            return []
+        by_name: dict[str, list[Symbol]] = {}
+        for s in symbols_by_id.values():
+            if s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CLASS}:
+                by_name.setdefault(s.name, []).append(s)
 
         relations: list[Relation] = []
         seen: set[str] = set()
@@ -753,34 +747,20 @@ class JediPythonProvider(GraphProvider):
             if line is None:
                 continue
             column = col if col is not None else getattr(node, "col_offset", 0)
-            try:
-                defs = script.goto(line, column, follow_imports=True)
-            except Exception:
+            matches = by_name.get(call_name, [])
+            same = [m for m in matches if m.location.path == symbol.location.path]
+            ordered = same + [m for m in matches if m.location.path != symbol.location.path]
+            if not ordered:
                 continue
-            for definition in defs:
-                if definition.type not in {"function", "class"} and definition.name != call_name:
+            for target in ordered[:40]:
+                if target.id == symbol.id or target.id in seen:
                     continue
-                if not definition.module_path:
-                    continue
-                rel = _rel(root, Path(definition.module_path))
-                matched = self._match_symbol(
-                    root,
-                    rel,
-                    definition.line or 1,
-                    definition.column or 0,
-                    definition.name,
-                    symbols_by_id,
-                )
-                if not matched or matched.id == symbol.id:
-                    continue
-                if matched.id in seen:
-                    continue
-                seen.add(matched.id)
+                seen.add(target.id)
                 relations.append(
                     Relation(
                         kind=RelationKind.CALLS,
                         from_id=symbol.id,
-                        to_id=matched.id,
+                        to_id=target.id,
                         location=Location(
                             path=symbol.location.path,
                             line=line,
