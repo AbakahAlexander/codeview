@@ -8,6 +8,7 @@ from typing import Iterable
 from tree_sitter import Language, Node, Parser, Query, QueryCursor
 import tree_sitter_cpp as tscpp
 
+from codeview.fsutil import rg_call_sites
 from codeview.models import Location, Relation, RelationKind, SourceSnippet, Symbol, SymbolKind
 from codeview.providers.base import GraphProvider
 
@@ -23,6 +24,10 @@ SKIP_DIRS = {
     "__pycache__",
     "node_modules",
     ".indexes",
+    "Documentation",
+    "tools",
+    "samples",
+    "scripts",
 }
 
 EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".cu", ".cuh"}
@@ -39,6 +44,17 @@ SYMBOL_QUERY = """
     declarator: (identifier) @func.name)) @func.def
 
 (function_definition
+  declarator: (pointer_declarator
+    declarator: (function_declarator
+      declarator: (identifier) @func_ptr.name))) @func_ptr.def
+
+(function_definition
+  declarator: (pointer_declarator
+    declarator: (pointer_declarator
+      declarator: (function_declarator
+        declarator: (identifier) @func_ptr2.name)))) @func_ptr2.def
+
+(function_definition
   declarator: (function_declarator
     declarator: (qualified_identifier
       name: (identifier) @method.name))) @method.def
@@ -50,6 +66,11 @@ SYMBOL_QUERY = """
 (declaration
   declarator: (function_declarator
     declarator: (identifier) @decl.name)) @decl.def
+
+(declaration
+  declarator: (pointer_declarator
+    declarator: (function_declarator
+      declarator: (identifier) @decl_ptr.name))) @decl_ptr.def
 
 (field_declaration
   declarator: (function_declarator
@@ -87,17 +108,6 @@ def _rel(root: Path, path: Path) -> str:
         return path.as_posix()
 
 
-def _iter_cxx_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in EXTENSIONS:
-            continue
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        yield path
-
-
 def _read_bytes(path: Path) -> bytes:
     try:
         return path.read_bytes()
@@ -120,10 +130,11 @@ def _loc(rel: str, node: Node) -> Location:
 
 
 class TreeSitterCxxProvider(GraphProvider):
-    """C/C++/CUDA symbol provider backed by tree-sitter-cpp."""
+    """C/C++/CUDA provider. Lazy by default — parses a file only when needed."""
 
     name = "treesitter-cxx"
     languages = ("c", "cpp", "cuda")
+    lazy_index = True
 
     def __init__(self) -> None:
         self._language = Language(tscpp.language())
@@ -131,136 +142,25 @@ class TreeSitterCxxProvider(GraphProvider):
         self._symbol_query = Query(self._language, SYMBOL_QUERY)
         self._call_query = Query(self._language, CALL_QUERY)
         self._base_query = Query(self._language, BASE_QUERY)
+        self.pending_symbols: list[Symbol] = []
+
+    def source_globs(self) -> list[str]:
+        return ["*.c", "*.h", "*.cc", "*.hh", "*.cpp", "*.cxx", "*.hpp", "*.hxx", "*.cu", "*.cuh"]
+
+    def source_extensions(self) -> set[str]:
+        return set(EXTENSIONS)
 
     def _parse(self, source: bytes) -> Node:
         return self._parser.parse(source).root_node
 
     def _captures(self, query: Query, root: Node) -> dict[str, list[Node]]:
-        cursor = QueryCursor(query)
-        caps = cursor.captures(root)
+        caps = QueryCursor(query).captures(root)
         if isinstance(caps, dict):
             return caps
         out: dict[str, list[Node]] = {}
         for node, name in caps:
             out.setdefault(name, []).append(node)
         return out
-
-    def index(self, root: Path) -> Iterable[Symbol]:
-        root = root.resolve()
-        for path in _iter_cxx_files(root):
-            rel = _rel(root, path)
-            source = _read_bytes(path)
-            if not source:
-                continue
-            tree = self._parse(source)
-            module_id = _stable_id("module", rel)
-            yield Symbol(
-                id=module_id,
-                name=path.name,
-                kind=SymbolKind.MODULE,
-                location=Location(path=rel, line=1, column=0),
-                qualname=rel,
-                language=self._language_for(path),
-            )
-
-            caps = self._captures(self._symbol_query, tree)
-            class_nodes = list(caps.get("class.name", [])) + list(caps.get("struct.name", []))
-            class_defs = list(caps.get("class.def", [])) + list(caps.get("struct.def", []))
-
-            class_ranges: list[tuple[Symbol, Node]] = []
-            for name_node, def_node in zip(class_nodes, class_defs):
-                name = _node_text(source, name_node)
-                symbol = Symbol(
-                    id=_stable_id("class", rel, name_node.start_point[0] + 1, name_node.start_point[1], name),
-                    name=name,
-                    kind=SymbolKind.CLASS,
-                    location=_loc(rel, name_node),
-                    qualname=f"{rel}::{name}",
-                    language=self._language_for(path),
-                    signature=f"class {name}",
-                    container_id=module_id,
-                )
-                class_ranges.append((symbol, def_node))
-                yield symbol
-
-            emitted_funcs: set[tuple[str, int, int]] = set()
-
-            def emit_function(name_node: Node, def_node: Node, *, method: bool) -> Symbol | None:
-                name = _node_text(source, name_node)
-                line = name_node.start_point[0] + 1
-                col = name_node.start_point[1]
-                key = (name, line, col)
-                if key in emitted_funcs:
-                    return None
-                emitted_funcs.add(key)
-
-                container_id = module_id
-                qualname = f"{rel}::{name}"
-                kind = SymbolKind.METHOD if method else SymbolKind.FUNCTION
-                for class_sym, class_node in class_ranges:
-                    if class_node.start_byte <= name_node.start_byte <= class_node.end_byte:
-                        container_id = class_sym.id
-                        qualname = f"{class_sym.qualname}::{name}"
-                        kind = SymbolKind.METHOD
-                        break
-
-                # Foo::bar outside class body
-                if not method and "::" in _node_text(source, def_node.child_by_field_name("declarator") or def_node):
-                    kind = SymbolKind.METHOD
-
-                text_head = _node_text(source, def_node).split("{", 1)[0].strip()
-                text_head = re.sub(r"\s+", " ", text_head)[:160]
-                return Symbol(
-                    id=_stable_id(kind.value, rel, line, col, name),
-                    name=name,
-                    kind=kind,
-                    location=_loc(rel, name_node),
-                    qualname=qualname,
-                    language=self._language_for(path),
-                    signature=text_head,
-                    container_id=container_id,
-                )
-
-            for name_node, def_node in zip(caps.get("func.name", []), caps.get("func.def", [])):
-                sym = emit_function(name_node, def_node, method=False)
-                if sym:
-                    yield sym
-
-            for name_node, def_node in zip(caps.get("method.name", []), caps.get("method.def", [])):
-                sym = emit_function(name_node, def_node, method=True)
-                if sym:
-                    # Attach to class by qualifier prefix when possible.
-                    full = _node_text(source, def_node)
-                    m = re.search(r"([A-Za-z_]\w*)\s*::\s*" + re.escape(sym.name), full)
-                    if m:
-                        cls = m.group(1)
-                        for class_sym, _ in class_ranges:
-                            if class_sym.name == cls:
-                                sym.container_id = class_sym.id
-                                sym.qualname = f"{class_sym.qualname}::{sym.name}"
-                                break
-                        else:
-                            # Class may be in a header; keep file-local qualname but mark method.
-                            sym.qualname = f"{rel}::{cls}::{sym.name}"
-                    yield sym
-
-            for name_node, def_node in zip(
-                caps.get("method_field.name", []) + caps.get("field_method.name", []),
-                caps.get("method_field.def", []) + caps.get("field_method.def", []),
-            ):
-                sym = emit_function(name_node, def_node, method=True)
-                if sym:
-                    yield sym
-
-            # Declarations in headers (no body) — useful for navigation.
-            for name_node, def_node in zip(caps.get("decl.name", []), caps.get("decl.def", [])):
-                # Skip if we already indexed a definition with same name in this file nearby.
-                name = _node_text(source, name_node)
-                if any(s_name == name for s_name, _, _ in emitted_funcs):
-                    continue
-                sym = emit_function(name_node, def_node, method=False)
-                if sym:
-                    yield sym
 
     @staticmethod
     def _language_for(path: Path) -> str:
@@ -271,71 +171,109 @@ class TreeSitterCxxProvider(GraphProvider):
             return "c"
         return "cpp"
 
+    def index(self, root: Path) -> Iterable[Symbol]:
+        return []
+
     def structural_relations(self, root: Path, symbols: list[Symbol]) -> Iterable[Relation]:
+        return []
+
+    def parse_file(self, root: Path, rel: str) -> tuple[list[Symbol], list[Relation]]:
+        """Parse one source file into symbols + containment edges."""
         root = root.resolve()
-        by_file: dict[str, list[Symbol]] = {}
-        for symbol in symbols:
-            by_file.setdefault(symbol.location.path, []).append(symbol)
+        path = root / rel
+        source = _read_bytes(path)
+        if not source:
+            return [], []
 
-        classes_by_name: dict[str, list[Symbol]] = {}
-        for symbol in symbols:
-            if symbol.kind == SymbolKind.CLASS:
-                classes_by_name.setdefault(symbol.name, []).append(symbol)
+        tree = self._parse(source)
+        module_id = _stable_id("file", rel)
+        symbols: list[Symbol] = [
+            Symbol(
+                id=module_id,
+                name=path.name,
+                kind=SymbolKind.MODULE,
+                location=Location(path=rel, line=1, column=0),
+                qualname=f"file:{rel}",
+                language=self._language_for(path),
+                signature="file",
+            )
+        ]
+        relations: list[Relation] = []
+        caps = self._captures(self._symbol_query, tree)
 
-        for symbol in symbols:
-            if symbol.container_id:
-                yield Relation(kind=RelationKind.CONTAINED_IN, from_id=symbol.id, to_id=symbol.container_id)
-                yield Relation(kind=RelationKind.CONTAINS, from_id=symbol.container_id, to_id=symbol.id)
+        class_ranges: list[tuple[Symbol, Node]] = []
+        for name_node, def_node in zip(
+            list(caps.get("class.name", [])) + list(caps.get("struct.name", [])),
+            list(caps.get("class.def", [])) + list(caps.get("struct.def", [])),
+        ):
+            name = _node_text(source, name_node)
+            sym = Symbol(
+                id=_stable_id("class", rel, name_node.start_point[0] + 1, name_node.start_point[1], name),
+                name=name,
+                kind=SymbolKind.CLASS,
+                location=_loc(rel, name_node),
+                qualname=f"{rel}::{name}",
+                language=self._language_for(path),
+                signature=f"class {name}",
+                container_id=module_id,
+            )
+            class_ranges.append((sym, def_node))
+            symbols.append(sym)
 
-        for rel_path, file_symbols in by_file.items():
-            path = root / rel_path
-            source = _read_bytes(path)
-            if not source:
-                continue
-            tree = self._parse(source)
-            file_classes = {s.name: s for s in file_symbols if s.kind == SymbolKind.CLASS}
+        emitted: set[tuple[str, int, int]] = set()
 
-            # Walk class nodes and attach bases.
-            caps = self._captures(self._symbol_query, tree)
-            class_name_nodes = list(caps.get("class.name", [])) + list(caps.get("struct.name", []))
-            class_def_nodes = list(caps.get("class.def", [])) + list(caps.get("struct.def", []))
-            for name_node, def_node in zip(class_name_nodes, class_def_nodes):
-                child_name = _node_text(source, name_node)
-                child = file_classes.get(child_name)
-                if not child:
-                    continue
-                base_caps = self._captures(self._base_query, def_node)
-                for base_node in base_caps.get("base.name", []):
-                    base_name = _node_text(source, base_node)
-                    parents = classes_by_name.get(base_name, [])
-                    parent = parents[0] if len(parents) == 1 else file_classes.get(base_name)
-                    if not parent:
-                        continue
-                    yield Relation(
-                        kind=RelationKind.PARENT_CLASS,
-                        from_id=child.id,
-                        to_id=parent.id,
-                        location=_loc(rel_path, base_node),
-                    )
-                    yield Relation(
-                        kind=RelationKind.CHILD_CLASS,
-                        from_id=parent.id,
-                        to_id=child.id,
-                        location=_loc(rel_path, base_node),
-                    )
+        def emit_function(name_node: Node, def_node: Node, *, method: bool) -> Symbol | None:
+            name = _node_text(source, name_node)
+            line = name_node.start_point[0] + 1
+            col = name_node.start_point[1]
+            key = (name, line, col)
+            if key in emitted:
+                return None
+            emitted.add(key)
+            container_id = module_id
+            qualname = f"{rel}::{name}"
+            kind = SymbolKind.METHOD if method else SymbolKind.FUNCTION
+            for class_sym, class_node in class_ranges:
+                if class_node.start_byte <= name_node.start_byte <= class_node.end_byte:
+                    container_id = class_sym.id
+                    qualname = f"{class_sym.qualname}::{name}"
+                    kind = SymbolKind.METHOD
+                    break
+            text_head = re.sub(r"\s+", " ", _node_text(source, def_node).split("{", 1)[0].strip())[:160]
+            return Symbol(
+                id=_stable_id(kind.value, rel, line, col, name),
+                name=name,
+                kind=kind,
+                location=_loc(rel, name_node),
+                qualname=qualname,
+                language=self._language_for(path),
+                signature=text_head,
+                container_id=container_id,
+            )
 
-        # Overrides by method name within known parent/child pairs are approximate.
-        methods_by_container: dict[str, dict[str, Symbol]] = {}
-        for symbol in symbols:
-            if symbol.kind == SymbolKind.METHOD and symbol.container_id:
-                methods_by_container.setdefault(symbol.container_id, {})[symbol.name] = symbol
+        pairs = (
+            list(zip(caps.get("func.name", []), caps.get("func.def", [])))
+            + list(zip(caps.get("func_ptr.name", []), caps.get("func_ptr.def", [])))
+            + list(zip(caps.get("func_ptr2.name", []), caps.get("func_ptr2.def", [])))
+            + list(zip(caps.get("method.name", []), caps.get("method.def", [])))
+            + list(zip(caps.get("method_field.name", []), caps.get("method_field.def", [])))
+            + list(zip(caps.get("field_method.name", []), caps.get("field_method.def", [])))
+            + list(zip(caps.get("decl.name", []), caps.get("decl.def", [])))
+            + list(zip(caps.get("decl_ptr.name", []), caps.get("decl_ptr.def", [])))
+        )
+        for name_node, def_node in pairs:
+            is_method = name_node in set(caps.get("method.name", [])) or name_node in set(
+                caps.get("method_field.name", [])
+            ) or name_node in set(caps.get("field_method.name", []))
+            sym = emit_function(name_node, def_node, method=is_method)
+            if sym:
+                symbols.append(sym)
 
-        # Build parent map from relations we just conceptually know: re-scan is heavy;
-        # approximate using qualnames already linked via container and class names.
-        class_ids = {s.id for s in symbols if s.kind == SymbolKind.CLASS}
-        # Use contains only; override detection deferred to expand if needed.
-        _ = class_ids
-        _ = methods_by_container
+        for sym in symbols:
+            if sym.container_id:
+                relations.append(Relation(kind=RelationKind.CONTAINED_IN, from_id=sym.id, to_id=sym.container_id))
+                relations.append(Relation(kind=RelationKind.CONTAINS, from_id=sym.container_id, to_id=sym.id))
+        return symbols, relations
 
     def expand(
         self,
@@ -344,6 +282,7 @@ class TreeSitterCxxProvider(GraphProvider):
         kind: RelationKind,
         symbols_by_id: dict[str, Symbol],
     ) -> list[Relation]:
+        self.pending_symbols = []
         root = root.resolve()
         if kind in {
             RelationKind.PARENT_CLASS,
@@ -354,34 +293,63 @@ class TreeSitterCxxProvider(GraphProvider):
             RelationKind.OVERRIDDEN_BY,
             RelationKind.IMPLEMENTS,
             RelationKind.IMPLEMENTED_BY,
+            RelationKind.REFERENCES,
+            RelationKind.REFERENCED_BY,
         }:
             return []
-
         if kind == RelationKind.CALLS:
             return self._callees(root, symbol, symbols_by_id)
-        if kind in {RelationKind.CALLED_BY, RelationKind.REFERENCES, RelationKind.REFERENCED_BY}:
-            return self._references(root, symbol, symbols_by_id, as_called_by=(kind == RelationKind.CALLED_BY))
+        if kind == RelationKind.CALLED_BY:
+            return self._callers_rg(root, symbol, symbols_by_id)
         return []
 
     def _find_def_node(self, source: bytes, symbol: Symbol) -> Node | None:
         tree = self._parse(source)
         caps = self._captures(self._symbol_query, tree)
-        buckets = [
-            ("func.name", "func.def"),
-            ("method.name", "method.def"),
-            ("method_field.name", "method_field.def"),
-            ("field_method.name", "field_method.def"),
-            ("class.name", "class.def"),
-            ("struct.name", "struct.def"),
-            ("decl.name", "decl.def"),
-        ]
-        for name_key, def_key in buckets:
-            for name_node, def_node in zip(caps.get(name_key, []), caps.get(def_key, [])):
+        name_keys = (
+            "func.name",
+            "func_ptr.name",
+            "func_ptr2.name",
+            "method.name",
+            "method_field.name",
+            "field_method.name",
+            "class.name",
+            "struct.name",
+            "decl.name",
+            "decl_ptr.name",
+        )
+        for name_key in name_keys:
+            for name_node in caps.get(name_key, []):
                 if _node_text(source, name_node) != symbol.name:
                     continue
-                if name_node.start_point[0] + 1 == symbol.location.line:
-                    return def_node
+                if name_node.start_point[0] + 1 != symbol.location.line:
+                    continue
+                return self._enclosing_def(name_node)
+        # Fallback: unique name match in file.
+        matches = []
+        for name_key in name_keys:
+            for name_node in caps.get(name_key, []):
+                if _node_text(source, name_node) == symbol.name:
+                    matches.append(name_node)
+        if len(matches) == 1:
+            return self._enclosing_def(matches[0])
         return None
+
+    @staticmethod
+    def _enclosing_def(name_node: Node) -> Node | None:
+        node: Node | None = name_node
+        while node is not None:
+            if node.type in {
+                "function_definition",
+                "class_specifier",
+                "struct_specifier",
+                "declaration",
+                "field_declaration",
+                "method_definition",
+            }:
+                return node
+            node = node.parent
+        return name_node
 
     def _callees(
         self,
@@ -396,116 +364,185 @@ class TreeSitterCxxProvider(GraphProvider):
         def_node = self._find_def_node(source, symbol)
         if def_node is None:
             return []
-        call_caps = self._captures(self._call_query, def_node)
-        names: list[tuple[str, Node]] = []
-        for key in ("call.name", "call.field", "call.qual"):
-            for node in call_caps.get(key, []):
-                names.append((_node_text(source, node), node))
 
+        # Prefer symbols from this file (lazy mode often has a sparse global map).
+        file_syms, _ = self.parse_file(root, symbol.location.path)
+        self.pending_symbols.extend(file_syms)
         by_name: dict[str, list[Symbol]] = {}
-        for s in symbols_by_id.values():
+        for s in list(symbols_by_id.values()) + file_syms:
             if s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CLASS}:
                 by_name.setdefault(s.name, []).append(s)
 
+        call_caps = self._captures(self._call_query, def_node)
         relations: list[Relation] = []
         seen: set[str] = set()
-        for call_name, node in names:
-            matches = by_name.get(call_name, [])
-            if not matches:
-                continue
-            # Prefer same-file, then unique global match.
-            same = [m for m in matches if m.location.path == symbol.location.path]
-            target = same[0] if same else (matches[0] if len(matches) == 1 else None)
-            if not target or target.id == symbol.id or target.id in seen:
-                continue
-            seen.add(target.id)
-            relations.append(
-                Relation(
-                    kind=RelationKind.CALLS,
-                    from_id=symbol.id,
-                    to_id=target.id,
-                    location=_loc(symbol.location.path, node),
-                )
-            )
+        for key in ("call.name", "call.field", "call.qual"):
+            for node in call_caps.get(key, []):
+                call_name = _node_text(source, node)
+                matches = by_name.get(call_name, [])
+                ordered = [m for m in matches if m.location.path == symbol.location.path]
+                ordered.extend(m for m in matches if m.location.path != symbol.location.path)
+                if not ordered:
+                    # Helpers often wrap C macros — surface the call even if unresolved.
+                    ordered = [
+                        Symbol(
+                            id=_stable_id("unresolved", symbol.location.path, call_name, node.start_point[0]),
+                            name=call_name,
+                            kind=SymbolKind.UNKNOWN,
+                            location=_loc(symbol.location.path, node),
+                            qualname=f"call:{call_name}",
+                            language="c",
+                            signature="unresolved call / macro",
+                        )
+                    ]
+                    self.pending_symbols.extend(ordered)
+                for target in ordered[:80]:
+                    if target.id == symbol.id or target.id in seen:
+                        continue
+                    seen.add(target.id)
+                    relations.append(
+                        Relation(
+                            kind=RelationKind.CALLS,
+                            from_id=symbol.id,
+                            to_id=target.id,
+                            location=_loc(symbol.location.path, node),
+                        )
+                    )
         return relations
 
-    def _references(
+    def _callers_rg(
         self,
         root: Path,
         symbol: Symbol,
         symbols_by_id: dict[str, Symbol],
-        *,
-        as_called_by: bool,
     ) -> list[Relation]:
-        pattern = re.compile(rf"\b{re.escape(symbol.name)}\b")
-        relations: list[Relation] = []
-        seen: set[tuple[str, int]] = set()
+        # C/C++ textual call sites for the exact symbol name.
+        hits = rg_call_sites(root, symbol.name, self.source_globs(), limit=500)
+        # Linux rust/helpers: bindgen renames rust_helper_FOO → bindings::FOO in Rust.
+        if symbol.name.startswith("rust_helper_"):
+            stripped = symbol.name[len("rust_helper_") :]
+            if stripped:
+                hits.extend(rg_call_sites(root, stripped, ["*.rs"], limit=500))
 
         scoped = [
             s
             for s in symbols_by_id.values()
             if s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CLASS}
         ]
-
-        for path in _iter_cxx_files(root):
-            rel = _rel(root, path)
-            text = _read_bytes(path).decode("utf-8", errors="replace")
-            for idx, line in enumerate(text.splitlines(), start=1):
-                if not pattern.search(line):
+        relations: list[Relation] = []
+        seen: set[str] = set()
+        for rel, line in hits:
+            if rel == symbol.location.path and line == symbol.location.line:
+                continue
+            if rel.endswith(".rs"):
+                caller = self._enclosing_rust(root, rel, line)
+                if caller is None or caller.id == symbol.id or caller.id in seen:
                     continue
-                if rel == symbol.location.path and idx == symbol.location.line:
-                    continue
-                if as_called_by and f"{symbol.name}(" not in line.replace(" ", ""):
-                    # loose call heuristic
-                    if not re.search(rf"\b{re.escape(symbol.name)}\s*\(", line):
-                        continue
-                enclosing = self._enclosing(scoped, rel, idx)
-                if not enclosing or enclosing.id == symbol.id:
-                    # Still record reference to self-located usage via meta target.
-                    to_id = enclosing.id if enclosing else symbol.id
-                else:
-                    to_id = enclosing.id
-                key = (to_id, idx)
-                if key in seen:
-                    continue
-                seen.add(key)
+                self.pending_symbols.append(caller)
+                seen.add(caller.id)
                 relations.append(
                     Relation(
-                        kind=RelationKind.CALLED_BY if as_called_by else RelationKind.REFERENCES,
+                        kind=RelationKind.CALLED_BY,
                         from_id=symbol.id,
-                        to_id=to_id,
-                        location=Location(path=rel, line=idx, column=line.find(symbol.name)),
+                        to_id=caller.id,
+                        location=Location(path=rel, line=line, column=0),
                     )
                 )
+                continue
+            # Ensure file symbols exist in scoped list when possible.
+            file_syms = [s for s in scoped if s.location.path == rel]
+            if not file_syms:
+                parsed, _ = self.parse_file(root, rel)
+                self.pending_symbols.extend(parsed)
+                file_syms = [s for s in parsed if s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CLASS}]
+                scoped.extend(file_syms)
+            caller = self._enclosing(file_syms or scoped, rel, line)
+            if not caller or caller.id == symbol.id or caller.id in seen:
+                continue
+            seen.add(caller.id)
+            relations.append(
+                Relation(
+                    kind=RelationKind.CALLED_BY,
+                    from_id=symbol.id,
+                    to_id=caller.id,
+                    location=Location(path=rel, line=line, column=0),
+                )
+            )
         return relations
+
+    def _enclosing_rust(self, root: Path, rel: str, line: int) -> Symbol | None:
+        """Best-effort nearest `fn name` above a Rust call site (no rust parser yet)."""
+        source = _read_bytes(root / rel)
+        if not source:
+            return None
+        text = source.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        fn_re = re.compile(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+        )
+        best: tuple[str, int] | None = None
+        for i, row in enumerate(lines[: max(0, line)], start=1):
+            m = fn_re.match(row)
+            if m:
+                best = (m.group(1), i)
+        if not best:
+            # Fall back to file-level symbol so the call site is still visible.
+            return Symbol(
+                id=_stable_id("rustfile", rel),
+                name=Path(rel).name,
+                kind=SymbolKind.MODULE,
+                location=Location(path=rel, line=1, column=0),
+                qualname=f"file:{rel}",
+                language="rust",
+                signature="file",
+            )
+        name, start = best
+        return Symbol(
+            id=_stable_id("rustfn", rel, name, start),
+            name=name,
+            kind=SymbolKind.FUNCTION,
+            location=Location(path=rel, line=start, column=0, end_line=line),
+            qualname=f"{rel}::{name}",
+            language="rust",
+            signature="fn",
+        )
 
     @staticmethod
     def _enclosing(scoped: list[Symbol], path: str, line: int) -> Symbol | None:
-        candidates = [s for s in scoped if s.location.path == path and s.location.line <= line]
+        candidates = [
+            s
+            for s in scoped
+            if s.location.path == path
+            and s.location.line <= line
+            and (s.location.end_line is None or s.location.end_line >= line)
+        ]
         if not candidates:
-            return None
-        # Prefer tightest end_line window when available.
-        def score(s: Symbol) -> tuple[int, int]:
-            end = s.location.end_line or 10**9
-            if end < line:
-                return (10**9, -s.location.line)
-            return (end - s.location.line, -s.location.line)
-
-        candidates.sort(key=score)
-        for s in candidates:
-            end = s.location.end_line
-            if end is None or end >= line:
-                return s
+            earlier = [s for s in scoped if s.location.path == path and s.location.line <= line]
+            if not earlier:
+                return None
+            earlier.sort(key=lambda s: s.location.line, reverse=True)
+            return earlier[0]
+        candidates.sort(key=lambda s: (s.location.end_line or 10**9) - s.location.line)
         return candidates[0]
 
     def source_for(self, root: Path, symbol: Symbol, context_lines: int = 12) -> SourceSnippet:
         root = root.resolve()
         path = root / symbol.location.path
+        if symbol.kind == SymbolKind.DIRECTORY:
+            return SourceSnippet(path=symbol.location.path, start_line=1, end_line=1, text="(directory)", highlight_line=1)
         source = _read_bytes(path)
         lines = source.decode("utf-8", errors="replace").splitlines()
         if not lines:
             return SourceSnippet(path=symbol.location.path, start_line=1, end_line=1, text="", highlight_line=1)
-
+        if symbol.kind == SymbolKind.MODULE and symbol.signature == "file":
+            end = min(len(lines), 40)
+            return SourceSnippet(
+                path=symbol.location.path,
+                start_line=1,
+                end_line=end,
+                text="\n".join(lines[:end]),
+                highlight_line=1,
+            )
         start = max(1, symbol.location.line - context_lines)
         end = min(len(lines), symbol.location.line + context_lines)
         def_node = self._find_def_node(source, symbol)
@@ -514,12 +551,10 @@ class TreeSitterCxxProvider(GraphProvider):
             end = min(len(lines), max(end, def_node.end_point[0] + 1))
         elif symbol.location.end_line:
             end = min(len(lines), max(end, symbol.location.end_line))
-
-        text = "\n".join(lines[start - 1 : end])
         return SourceSnippet(
             path=symbol.location.path,
             start_line=start,
             end_line=end,
-            text=text,
+            text="\n".join(lines[start - 1 : end]),
             highlight_line=symbol.location.line,
         )

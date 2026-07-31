@@ -7,6 +7,7 @@ from typing import Any
 
 class SymbolKind(str, Enum):
     MODULE = "module"
+    DIRECTORY = "directory"
     CLASS = "class"
     FUNCTION = "function"
     METHOD = "method"

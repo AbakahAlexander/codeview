@@ -1,65 +1,62 @@
 # Codeview
 
-Local-first, IDE-independent code explorer.
+Local-first code explorer for large codebases.
 
-Point Codeview at a codebase, search for a class, function, method, or symbol, and interactively explore nearby relationships — without dumping the entire repository into one giant graph.
+Index a project on your machine, search for a symbol, and expand its neighborhood — members, callers, callees, and source — without uploading anything or relying on an IDE.
 
-## Features
-
-- Local analysis only (no repository upload, no AI dependency)
-- SQLite-backed indexes under `~/.codeview/indexes`
-- Lazy relationship loading when you expand a branch
-- Neighborhood exploration: definition, callers, callees, references, inheritance, overrides, source
-- Breadcrumbs, browser-style history, and saved exploration paths
-- Pluggable graph providers (starts with Python via Jedi)
-
-## Quick start
+## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-# Index a local Python project and open the UI
-codeview serve --root /path/to/python/repo --port 8765
+uvx --from git+https://github.com/AbakahAlexander/codeview@main codeview --help
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
-
-You can also index first, then serve:
+Or:
 
 ```bash
-codeview index /path/to/python/repo
-codeview serve --db ~/.codeview/indexes/<index-name>.sqlite3
+pipx install 'git+https://github.com/AbakahAlexander/codeview.git'
 ```
 
-Or start the UI empty and paste a local path into the sidebar.
+Requires Python 3.10+, `git`, and [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your `PATH`.
 
-## Commands
+## Usage
 
 ```bash
+# explore the current directory
+codeview serve .
+
+# explore any public git repository
+codeview serve https://github.com/OWNER/REPO
+```
+
+Then open http://127.0.0.1:8765.
+
+```bash
+codeview index .
+codeview search SomeSymbol --db ~/.codeview/indexes/<name>.sqlite3
 codeview providers
-codeview index <path> [--provider jedi-python] [--db path.sqlite3]
-codeview search <query> --db path.sqlite3
-codeview serve [--root <path>] [--db path.sqlite3] [--host 127.0.0.1] [--port 8765]
 ```
 
-## Provider interface
+Indexes are stored under `~/.codeview/indexes/`.
 
-Codeview talks to indexers through a common `GraphProvider` API:
+## Languages
 
-- `index(root)` → symbols
-- `structural_relations(root, symbols)` → cheap edges (containment, inheritance, overrides)
-- `expand(root, symbol, kind, symbols_by_id)` → lazy edges (calls, callers, references)
-- `source_for(root, symbol)` → source snippet
+By default Codeview **auto-detects** languages and builds one combined index:
 
-The first bundled provider is `jedi-python`. The same interface is intended for later SCIP, Tree-sitter-based tools, Codegraph, Joern, or language-specific indexers.
+| Language | Status |
+|----------|--------|
+| Java | Full index + call graph |
+| Scala | Symbols + call edges |
+| Python | Full index |
+| C / C++ / CUDA | Lazy index (good for very large trees) |
 
-## Design notes
+More languages can be added through the provider interface.
 
-- The UI shows only the current symbol and expandable nearby relationships
-- Relationship queries are resolved on demand and cached in SQLite
-- All processing stays on the machine running Codeview
+## Design
+
+- Runs only on localhost; nothing leaves your machine
+- Shows a symbol neighborhood, not a whole-repo graph dump
+- Call edges are name-based (AST + search). When several symbols share a name, **all candidates are shown** so nothing is silently omitted
+- Pluggable providers (`index`, `expand`, `source_for`) for future language backends
 
 ## License
 

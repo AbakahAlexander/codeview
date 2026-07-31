@@ -2,19 +2,14 @@ const BRANCHES = [
   { kind: "contains", label: "members" },
   { kind: "called_by", label: "callers" },
   { kind: "calls", label: "callees" },
-  { kind: "parent_class", label: "parents" },
-  { kind: "child_class", label: "children" },
-  { kind: "overrides", label: "overrides" },
-  { kind: "overridden_by", label: "overridden by" },
-  { kind: "implements", label: "implements" },
-  { kind: "implemented_by", label: "implemented by" },
-  { kind: "references", label: "references" },
 ];
 
 const state = {
   history: [],
   historyIndex: -1,
   selectedId: null,
+  browsePath: "",
+  mode: "symbols",
 };
 
 const els = {
@@ -49,14 +44,21 @@ function esc(s) {
 function updateNav() {
   els.back.disabled = state.historyIndex <= 0;
   els.forward.disabled = state.historyIndex >= state.history.length - 1;
-  els.crumbs.textContent = state.history
-    .slice(0, state.historyIndex + 1)
-    .map((s) => s.name)
-    .join(" / ");
+  const current = state.history[state.historyIndex];
+  els.crumbs.textContent = current
+    ? `${current.name} · ${current.path}${current.line ? ":" + current.line : ""}`
+    : state.browsePath
+      ? `path: ${state.browsePath || "."}`
+      : "";
 }
 
 function pushHistory(symbol) {
-  const step = { id: symbol.id, name: symbol.name };
+  const step = {
+    id: symbol.id,
+    name: symbol.name,
+    path: symbol.location.path,
+    line: symbol.location.line,
+  };
   state.history = state.history.slice(0, state.historyIndex + 1);
   if (state.history[state.historyIndex]?.id === step.id) {
     updateNav();
@@ -72,6 +74,11 @@ async function selectSymbol(symbol, record = true) {
   document.querySelectorAll(".sym.active").forEach((el) => el.classList.remove("active"));
   document.querySelectorAll(`.sym[data-id="${symbol.id}"]`).forEach((el) => el.classList.add("active"));
   if (record) pushHistory(symbol);
+  if (symbol.kind === "directory") {
+    els.srcMeta.textContent = symbol.location.path;
+    els.src.textContent = "(directory — expand with + to browse)";
+    return;
+  }
   const snippet = await api(`/api/source/${symbol.id}`);
   els.srcMeta.textContent = `${snippet.path}:${snippet.start_line}-${snippet.end_line}`;
   const lines = (snippet.text || "").split("\n");
@@ -89,7 +96,7 @@ function symbolButton(symbol) {
   btn.type = "button";
   btn.className = "sym" + (state.selectedId === symbol.id ? " active" : "");
   btn.dataset.id = symbol.id;
-  btn.innerHTML = `<span>${esc(symbol.name)}</span> <span class="kind">${esc(symbol.kind)}</span> <span class="loc">${esc(symbol.location.path)}:${symbol.location.line}</span>`;
+  btn.innerHTML = `<span>${esc(symbol.name)}</span> <span class="kind">${esc(symbol.kind)}</span> <span class="loc">${esc(symbol.location.path)}${symbol.kind === "directory" ? "" : ":" + symbol.location.line}</span>`;
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     selectSymbol(symbol, true);
@@ -97,7 +104,8 @@ function symbolButton(symbol) {
   return btn;
 }
 
-function makeSymbolNode(symbol) {
+function makeSymbolNode(symbol, ancestors = []) {
+  const path = ancestors.includes(symbol.id) ? ancestors : [...ancestors, symbol.id];
   const li = document.createElement("li");
   const row = document.createElement("div");
   row.className = "row";
@@ -128,7 +136,11 @@ function makeSymbolNode(symbol) {
       loaded = true;
       children.innerHTML = `<li class="empty">loading…</li>`;
       try {
-        await loadBranches(symbol, children);
+        if (symbol.kind === "directory") {
+          await loadDirectoryChildren(symbol, children, path);
+        } else {
+          await loadBranches(symbol, children, path);
+        }
       } catch (err) {
         children.innerHTML = `<li class="empty">${esc(err.message)}</li>`;
       }
@@ -142,57 +154,84 @@ function makeSymbolNode(symbol) {
   return li;
 }
 
-async function loadBranches(symbol, container) {
+async function loadDirectoryChildren(symbol, container, ancestors) {
+  const rel = symbol.location.path === "." ? "" : symbol.location.path;
+  const data = await api(`/api/tree?path=${encodeURIComponent(rel)}`);
   container.innerHTML = "";
+  if (!data.results.length) {
+    container.innerHTML = `<li class="empty">empty</li>`;
+    return;
+  }
+  data.results.forEach((s) => container.appendChild(makeSymbolNode(s, ancestors)));
+}
+
+async function loadBranches(symbol, container, ancestors = []) {
+  container.innerHTML = "";
+  const blocked = new Set(ancestors);
+
+  // For files, members = parse file contents.
+  const kinds =
+    symbol.kind === "module" && symbol.signature === "file"
+      ? [{ kind: "contains", label: "symbols" }]
+      : BRANCHES;
+
+  const results = await Promise.all(
+    kinds.map(async (branch) => {
+      const data = await api("/api/expand", {
+        method: "POST",
+        body: JSON.stringify({ symbol_id: symbol.id, kind: branch.kind }),
+      });
+      const relations = (data.relations || []).filter((r) => r.to_symbol);
+      const items = relations
+        .map((r) => r.to_symbol)
+        .filter((s) => s && s.id !== symbol.id && !blocked.has(s.id));
+      const seen = new Set();
+      const unique = [];
+      for (const s of items) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        unique.push(s);
+      }
+      return { branch, unique, total: data.total ?? unique.length, truncated: !!data.truncated };
+    })
+  );
+
   let any = false;
-
-  for (const branch of BRANCHES) {
-    const data = await api("/api/expand", {
-      method: "POST",
-      body: JSON.stringify({ symbol_id: symbol.id, kind: branch.kind }),
-    });
-    const relations = (data.relations || []).filter((r) => r.to_symbol);
-    // For contains, skip pointing back at modules noise if any
-    const items = relations
-      .map((r) => r.to_symbol)
-      .filter((s) => s && s.id !== symbol.id);
-
-    // dedupe by id
-    const seen = new Set();
-    const unique = [];
-    for (const s of items) {
-      if (seen.has(s.id)) continue;
-      seen.add(s.id);
-      unique.push(s);
-    }
+  for (const { branch, unique, total, truncated } of results) {
     if (!unique.length) continue;
-
     any = true;
     const groupLi = document.createElement("li");
     const label = document.createElement("div");
     label.className = "group";
-    label.textContent = `${branch.label} (${unique.length})`;
+    label.textContent = truncated
+      ? `${branch.label} (${unique.length} of ${total})`
+      : `${branch.label} (${unique.length})`;
     const list = document.createElement("ul");
-    unique.forEach((s) => list.appendChild(makeSymbolNode(s)));
+    unique.forEach((s) => list.appendChild(makeSymbolNode(s, ancestors)));
     groupLi.appendChild(label);
     groupLi.appendChild(list);
     container.appendChild(groupLi);
   }
 
   if (!any) {
-    container.innerHTML = `<li class="empty">no relations</li>`;
+    container.innerHTML = `<li class="empty">no further relations</li>`;
   }
 }
 
 async function loadTree() {
   const q = els.filter.value.trim();
-  const data = await api(`/api/tree?q=${encodeURIComponent(q)}`);
+  const qs = q
+    ? `/api/tree?q=${encodeURIComponent(q)}`
+    : `/api/tree?path=${encodeURIComponent(state.browsePath || "")}`;
+  const data = await api(qs);
+  state.mode = data.mode || "symbols";
   els.tree.innerHTML = "";
   if (!data.results.length) {
-    els.tree.innerHTML = `<li class="empty">no top-level symbols</li>`;
+    els.tree.innerHTML = `<li class="empty">${q ? "no matches" : "empty"}</li>`;
     return;
   }
   data.results.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
+  updateNav();
 }
 
 async function init() {
@@ -202,7 +241,8 @@ async function init() {
       els.status.textContent = "no index";
       return;
     }
-    els.status.textContent = `${stats.symbol_count} symbols · ${stats.root}`;
+    const mode = stats.index_mode === "lazy" ? "lazy" : "full";
+    els.status.textContent = `${stats.file_count || stats.symbol_count} files · ${mode} · ${stats.root}`;
     await loadTree();
   } catch (err) {
     els.status.textContent = err.message;

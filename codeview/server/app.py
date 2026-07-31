@@ -16,7 +16,7 @@ TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 class IndexRequest(BaseModel):
     path: str
-    provider: str = "jedi-python"
+    provider: str = "auto"
     db: str | None = None
 
 
@@ -79,23 +79,59 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
         store = service.store
         if not store:
             return {"has_index": False}
-        return {"has_index": True, **store.stats(), "db": str(service.db_path)}
+        data = store.stats()
+        if store.get_meta("file_count") and not data.get("file_count"):
+            data["file_count"] = int(store.get_meta("file_count") or 0)
+        data["index_mode"] = store.get_meta("index_mode") or "eager"
+        return {"has_index": True, **data, "db": str(service.db_path)}
 
     @app.get("/api/search")
     def search(q: str, limit: int = 40) -> dict:
         store = service.store
         if not store:
             raise HTTPException(status_code=400, detail="No index loaded")
-        hits = store.search(q, limit=limit)
+        if store.get_meta("index_mode") == "lazy":
+            hits = service.search_lazy(q, limit=limit)
+        else:
+            hits = store.search(q, limit=limit)
         return {"query": q, "results": [h.to_dict() for h in hits]}
 
     @app.get("/api/tree")
-    def tree(q: str = "", limit: int = 500) -> dict:
+    def tree(q: str = "", path: str = "", limit: int = 2000) -> dict:
         store = service.store
         if not store:
             raise HTTPException(status_code=400, detail="No index loaded")
-        symbols = store.top_level(query=q or None, limit=limit)
-        return {"results": [s.to_dict() for s in symbols]}
+
+        mode = store.get_meta("index_mode") or "eager"
+        if mode == "lazy":
+            if q.strip():
+                hits = service.search_lazy(q.strip(), limit=min(limit, 80))
+                return {"results": [s.to_dict() for s in hits], "mode": "search", "truncated": False}
+            children = service.browse(path)
+            # Persist so expand/source can resolve ids.
+            if children:
+                service.upsert_ephemeral(children)
+            return {
+                "results": [s.to_dict() for s in children],
+                "mode": "browse",
+                "path": path or ".",
+                "truncated": False,
+            }
+
+        if mode == "hybrid" and path.strip():
+            children = service.browse(path)
+            if children:
+                service.upsert_ephemeral(children)
+            return {
+                "results": [s.to_dict() for s in children],
+                "mode": "browse",
+                "path": path or ".",
+                "truncated": False,
+            }
+
+        effective = limit if q.strip() else min(limit, 400)
+        symbols = store.top_level(query=q or None, limit=effective)
+        return {"results": [s.to_dict() for s in symbols], "mode": "symbols", "truncated": len(symbols) >= effective}
 
     @app.get("/api/symbol/{symbol_id}")
     def get_symbol(symbol_id: str) -> dict:
@@ -132,18 +168,19 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
         if not service.store:
             raise HTTPException(status_code=400, detail="No index loaded")
         try:
-            relations = service.expand(body.symbol_id, body.kind)
+            relations, total = service.expand(body.symbol_id, body.kind, limit=500)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        store = service.store
-        enriched = []
-        for rel in relations:
-            target = store.get_symbol(rel["to_id"])
-            enriched.append({**rel, "to_symbol": target.to_dict() if target else None})
-        return {"symbol_id": body.symbol_id, "kind": body.kind, "relations": enriched}
+        return {
+            "symbol_id": body.symbol_id,
+            "kind": body.kind,
+            "relations": relations,
+            "total": total,
+            "truncated": total > len(relations),
+        }
 
     @app.get("/api/source/{symbol_id}")
     def source(symbol_id: str) -> dict:

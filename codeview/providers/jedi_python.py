@@ -65,6 +65,72 @@ class JediPythonProvider(GraphProvider):
 
     def __init__(self) -> None:
         self._projects: dict[str, jedi.Project] = {}
+        self.pending_symbols: list[Symbol] = []
+
+    def source_globs(self) -> list[str]:
+        return ["*.py"]
+
+    def source_extensions(self) -> set[str]:
+        return {".py"}
+
+    def parse_file(self, root: Path, rel: str) -> tuple[list[Symbol], list[Relation]]:
+        """Lightweight single-file parse for multi-provider browse."""
+        root = root.resolve()
+        path = root / rel
+        if not path.is_file():
+            return [], []
+        source = _read_text(path)
+        try:
+            tree = ast.parse(source, filename=rel)
+        except SyntaxError:
+            return [], []
+        module_id = _stable_id("module", rel)
+        symbols: list[Symbol] = [
+            Symbol(
+                id=module_id,
+                name=path.name,
+                kind=SymbolKind.MODULE,
+                location=Location(path=rel, line=1, column=0),
+                qualname=rel[:-3].replace("/", ".") if rel.endswith(".py") else rel,
+                language="python",
+                signature="file",
+            )
+        ]
+        relations: list[Relation] = []
+
+        def add_container(node: ast.AST, name: str, kind: SymbolKind, container_id: str) -> Symbol:
+            sym = Symbol(
+                id=_stable_id(kind.value, rel, getattr(node, "lineno", 1), name),
+                name=name,
+                kind=kind,
+                location=Location(
+                    path=rel,
+                    line=getattr(node, "lineno", 1),
+                    column=getattr(node, "col_offset", 0),
+                    end_line=getattr(node, "end_lineno", None),
+                ),
+                qualname=f"{rel}::{name}",
+                language="python",
+                signature=f"{kind.value} {name}",
+                container_id=container_id,
+            )
+            symbols.append(sym)
+            return sym
+
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                cls = add_container(node, node.name, SymbolKind.CLASS, module_id)
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        add_container(child, child.name, SymbolKind.METHOD, cls.id)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                add_container(node, node.name, SymbolKind.FUNCTION, module_id)
+
+        for sym in symbols:
+            if sym.container_id:
+                relations.append(Relation(kind=RelationKind.CONTAINED_IN, from_id=sym.id, to_id=sym.container_id))
+                relations.append(Relation(kind=RelationKind.CONTAINS, from_id=sym.container_id, to_id=sym.id))
+        return symbols, relations
 
     def _project(self, root: Path) -> jedi.Project:
         key = str(root.resolve())

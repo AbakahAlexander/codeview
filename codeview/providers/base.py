@@ -41,3 +41,20 @@ class GraphProvider(ABC):
 
     def supports(self, language: str) -> bool:
         return language.lower() in {lang.lower() for lang in self.languages}
+
+    # When True, index only records the root; symbols are parsed on demand.
+    lazy_index: bool = False
+
+    # When True, index_call_relations() fills calls/called_by into SQLite up front.
+    precomputes_calls: bool = False
+
+    def index_call_relations(self, root: Path, symbols: list[Symbol]) -> Iterable[Relation]:
+        """Optional full call-graph pass at index time (for large repos)."""
+        return []
+
+    def source_globs(self) -> list[str]:
+        return ["*.*"]
+
+    def source_extensions(self) -> set[str]:
+        return set()
+
