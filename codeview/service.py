@@ -367,6 +367,25 @@ class ExplorerService:
                 symbols_by_id[s.id] = s
             symbols_by_id[symbol.id] = symbol
 
+            # Callee resolution is cross-file; seed only same-file + name search of
+            # *this* symbol misses targets like search_engine → search_assets.
+            # Let the provider resolve unknown call names via the store.
+            callable_kinds = {
+                SymbolKind.FUNCTION,
+                SymbolKind.METHOD,
+                SymbolKind.CLASS,
+            }
+
+            def _lookup_name(name: str, limit: int = 40) -> list[Symbol]:
+                out: list[Symbol] = []
+                for s in store.search(name, limit=limit):
+                    if s.name == name and s.kind in callable_kinds:
+                        out.append(s)
+                        symbols_by_id[s.id] = s
+                return out
+
+            setattr(provider, "lookup_name", _lookup_name)
+
             relations = provider.expand(root, symbol, relation_kind, symbols_by_id)
             pending = getattr(provider, "pending_symbols", None) or []
             if pending:

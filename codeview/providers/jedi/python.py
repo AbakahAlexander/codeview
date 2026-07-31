@@ -762,6 +762,12 @@ class JediPythonProvider(GraphProvider):
                 continue
             column = col if col is not None else getattr(node, "col_offset", 0)
             matches = by_name.get(call_name, [])
+            if not matches:
+                lookup = getattr(self, "lookup_name", None)
+                if callable(lookup):
+                    matches = lookup(call_name)
+                    for m in matches:
+                        by_name.setdefault(m.name, []).append(m)
             same = [m for m in matches if m.location.path == symbol.location.path]
             ordered = same + [m for m in matches if m.location.path != symbol.location.path]
             if not ordered:

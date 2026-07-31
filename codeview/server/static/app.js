@@ -182,39 +182,60 @@ async function loadBranches(symbol, container, ancestors = []) {
         body: JSON.stringify({ symbol_id: symbol.id, kind: branch.kind }),
       });
       const relations = (data.relations || []).filter((r) => r.to_symbol);
-      const items = relations
-        .map((r) => r.to_symbol)
-        .filter((s) => s && s.id !== symbol.id && !blocked.has(s.id));
       const seen = new Set();
       const unique = [];
-      for (const s of items) {
-        if (seen.has(s.id)) continue;
+      const back = [];
+      for (const r of relations) {
+        const s = r.to_symbol;
+        if (!s || s.id === symbol.id || seen.has(s.id)) continue;
         seen.add(s.id);
-        unique.push(s);
+        if (blocked.has(s.id)) back.push(s);
+        else unique.push(s);
       }
-      return { branch, unique, total: data.total ?? unique.length, truncated: !!data.truncated };
+      return {
+        branch,
+        unique,
+        back,
+        total: data.total ?? unique.length + back.length,
+        truncated: !!data.truncated,
+      };
     })
   );
 
   let any = false;
-  for (const { branch, unique, total, truncated } of results) {
-    if (!unique.length) continue;
+  for (const { branch, unique, back, total, truncated } of results) {
+    if (!unique.length && !back.length) continue;
     any = true;
     const groupLi = document.createElement("li");
     const label = document.createElement("div");
     label.className = "group";
+    const shown = unique.length + back.length;
     label.textContent = truncated
-      ? `${branch.label} (${unique.length} of ${total})`
-      : `${branch.label} (${unique.length})`;
+      ? `${branch.label} (${shown} of ${total})`
+      : `${branch.label} (${shown})`;
     const list = document.createElement("ul");
     unique.forEach((s) => list.appendChild(makeSymbolNode(s, ancestors)));
+    // Keep back-edges visible (e.g. A→B→A) but don't offer another expand cycle.
+    back.forEach((s) => {
+      const li = document.createElement("li");
+      const row = document.createElement("div");
+      row.className = "row";
+      const mark = document.createElement("span");
+      mark.className = "toggle";
+      mark.textContent = "·";
+      mark.title = "already in path";
+      row.appendChild(mark);
+      row.appendChild(symbolButton(s));
+      li.appendChild(row);
+      list.appendChild(li);
+    });
     groupLi.appendChild(label);
     groupLi.appendChild(list);
     container.appendChild(groupLi);
   }
 
   if (!any) {
-    container.innerHTML = `<li class="empty">no further relations</li>`;
+    container.innerHTML = `<li class="empty">no members, callers, or callees in index</li>`;
   }
 }
 
