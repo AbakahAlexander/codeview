@@ -10,8 +10,10 @@ from pydantic import BaseModel, Field
 from codeview.providers import list_providers
 from codeview.service import ExplorerService, default_db_path
 
-STATIC_DIR = Path(__file__).parent / "static"
-TEMPLATE_DIR = Path(__file__).parent / "templates"
+# Prefer the exploration frontend package; fall back to legacy server/ paths.
+_FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
+STATIC_DIR = _FRONTEND / "static" if (_FRONTEND / "static").is_dir() else Path(__file__).parent / "static"
+TEMPLATE_DIR = _FRONTEND / "templates" if (_FRONTEND / "templates").is_dir() else Path(__file__).parent / "templates"
 
 
 class IndexRequest(BaseModel):

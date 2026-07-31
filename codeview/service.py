@@ -95,18 +95,21 @@ class ExplorerService:
         *,
         provider_name: str = "auto",
         db_path: Path | None = None,
+        scip_path: Path | None = None,
     ) -> IndexStats:
         root = root.resolve()
         if not root.is_dir():
             raise FileNotFoundError(f"Not a directory: {root}")
 
+        if scip_path is not None:
+            provider_name = "scip"
+
         if provider_name in {"auto", "", "multi"}:
             provider_names = detect_providers(root)
             if not provider_names:
                 raise ValueError(
-                    "No supported languages detected. "
-                    "Supported: Python, Java, Scala, C/C++/CUDA. "
-                    "Pass --provider explicitly if needed."
+                    "No supported languages detected and no index.scip found. "
+                    "Generate a SCIP index, or pass --provider explicitly."
                 )
         else:
             provider_names = [provider_name]
@@ -117,7 +120,12 @@ class ExplorerService:
         store.clear_index()
         started = time.perf_counter()
 
-        providers = [self._get_provider(name) for name in provider_names]
+        providers = [
+            get_provider(name, scip_path=scip_path) if name == "scip" else self._get_provider(name)
+            for name in provider_names
+        ]
+        if scip_path is not None:
+            self._provider_cache["scip"] = providers[0]
         lazy_only = all(getattr(p, "lazy_index", False) for p in providers)
         languages: list[str] = []
         for p in providers:
@@ -171,6 +179,11 @@ class ExplorerService:
         store.set_meta("index_mode", "hybrid" if has_lazy else "eager")
         store.set_meta("calls_indexed", "1" if calls_langs else "0")
         store.set_meta("calls_indexed_langs", ",".join(dict.fromkeys(calls_langs)))
+        # External indexes (SCIP) ship references/inheritance with the symbols.
+        if any(not getattr(p, "owns_indexing", True) for p in providers) or "scip" in provider_names:
+            store.set_meta("edges_ready", "1")
+        else:
+            store.set_meta("edges_ready", "0")
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         self._write_index_meta(
@@ -319,6 +332,11 @@ class ExplorerService:
             precomputed_langs = {
                 x for x in (store.get_meta("calls_indexed_langs") or "").split(",") if x
             }
+            # External indexes already materialised edges (SCIP references, etc.).
+            if store.get_meta("edges_ready") == "1" and relation_kind in LAZY_KINDS:
+                store.mark_expanded(symbol_id, relation_kind)
+                return store.relations_enriched(symbol_id, relation_kind, limit=limit)
+
             # Precomputed edges are a cache seed only. Always re-expand call neighborhoods
             # so ambiguous same-name candidates are not silently omitted from the UI.
             if relation_kind not in LAZY_KINDS:

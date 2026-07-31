@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Codeview</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="#/">Codeview</a>
+    <span id="status"></span>
+    <input id="filter" type="search" placeholder="Search symbols…" autocomplete="off" />
+    <button type="button" id="back" title="Back">←</button>
+    <button type="button" id="forward" title="Forward">→</button>
+  </header>
+  <main class="layout">
+    <aside class="list-pane">
+      <div id="listMeta" class="pane-meta"></div>
+      <ul id="results" class="results"></ul>
+    </aside>
+    <section class="explore-pane">
+      <div id="exploreEmpty" class="empty-state">Search for a symbol to explore its neighborhood.</div>
+      <article id="explore" class="explore" hidden>
+        <header class="explore-head">
+          <h1 id="symName"></h1>
+          <div id="symMeta" class="sym-meta"></div>
+        </header>
+        <section class="block">
+          <h2>Definition</h2>
+          <div id="srcMeta" class="src-meta"></div>
+          <pre id="src"><code></code></pre>
+        </section>
+        <div id="sections"></div>
+      </article>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

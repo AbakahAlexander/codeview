@@ -75,8 +75,19 @@ def language_for_extension(ext: str) -> str:
 
 
 def detect_providers(root: Path, *, sample_limit: int = 200_000) -> list[str]:
-    """Return provider names present under root, ordered by importance for Iceberg-like repos."""
+    """Return provider names present under root, ordered by importance.
+
+    Prefer an existing SCIP index when present — Codeview should not reinvent indexing.
+    """
     root = root.resolve()
+    try:
+        from codeview.providers.scip import find_scip_index
+
+        if find_scip_index(root) is not None:
+            return ["scip"]
+    except Exception:
+        pass
+
     found: set[str] = set()
     count = 0
 

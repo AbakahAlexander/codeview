@@ -14,7 +14,7 @@ from codeview.service import ExplorerService, default_db_path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codeview",
-        description="Local-first multi-language code explorer",
+        description="Lightweight IDE-independent source code explorer",
     )
     parser.add_argument("--version", action="version", version=f"codeview {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -22,12 +22,18 @@ def build_parser() -> argparse.ArgumentParser:
     index_p = sub.add_parser("index", help="Index a local path or public git URL into SQLite")
     index_p.add_argument(
         "target",
-        help="Local directory or public git URL (e.g. https://github.com/apache/iceberg)",
+        help="Local directory or public git URL",
     )
     index_p.add_argument(
         "--provider",
         default="auto",
-        help="Provider name, or 'auto' to detect languages (default: auto)",
+        help="Provider name, or 'auto' (SCIP if present, else language detect)",
+    )
+    index_p.add_argument(
+        "--scip",
+        type=Path,
+        default=None,
+        help="Path to an index.scip file (implies --provider scip)",
     )
     index_p.add_argument(
         "--db",
@@ -44,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         "target",
         nargs="?",
         default=None,
-        help="Local directory or public git URL to index, e.g. . or https://github.com/apache/iceberg",
+        help="Local directory or public git URL to index",
     )
     serve_p.add_argument(
         "--db",
@@ -61,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Deprecated: use positional target instead",
     )
     serve_p.add_argument("--provider", default="auto")
+    serve_p.add_argument(
+        "--scip",
+        type=Path,
+        default=None,
+        help="Path to an index.scip file (implies --provider scip)",
+    )
 
     sub.add_parser("providers", help="List available graph providers")
 
@@ -88,7 +100,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         db = args.db or default_db_path(root)
         try:
-            stats = service.index_path(root, provider_name=args.provider, db_path=db)
+            stats = service.index_path(
+                root,
+                provider_name=args.provider,
+                db_path=db,
+                scip_path=args.scip,
+            )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -112,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             db = args.db or default_db_path(root)
             try:
-                stats = service.index_path(root, provider_name=args.provider, db_path=db)
+                stats = service.index_path(
+                    root,
+                    provider_name=args.provider,
+                    db_path=db,
+                    scip_path=getattr(args, "scip", None),
+                )
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -124,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 "Pass a local path, a git URL, or --db. Examples:\n"
                 "  codeview serve .\n"
-                "  codeview serve https://github.com/apache/iceberg\n"
+                "  codeview serve https://github.com/OWNER/REPO\n"
                 "  codeview serve --db ~/.codeview/indexes/....sqlite3",
                 file=sys.stderr,
             )
