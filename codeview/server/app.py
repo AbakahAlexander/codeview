@@ -89,6 +89,14 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
         hits = store.search(q, limit=limit)
         return {"query": q, "results": [h.to_dict() for h in hits]}
 
+    @app.get("/api/tree")
+    def tree(q: str = "", limit: int = 500) -> dict:
+        store = service.store
+        if not store:
+            raise HTTPException(status_code=400, detail="No index loaded")
+        symbols = store.top_level(query=q or None, limit=limit)
+        return {"results": [s.to_dict() for s in symbols]}
+
     @app.get("/api/symbol/{symbol_id}")
     def get_symbol(symbol_id: str) -> dict:
         store = service.store

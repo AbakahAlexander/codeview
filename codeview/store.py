@@ -212,6 +212,37 @@ class SymbolStore:
         ).fetchall()
         return [self._row_to_symbol(row) for row in rows]
 
+    def top_level(self, query: str | None = None, limit: int = 500) -> list[Symbol]:
+        """Module-level classes and functions (not methods/modules)."""
+        q = (query or "").strip()
+        if q:
+            like = f"%{q}%"
+            rows = self._conn.execute(
+                """
+                SELECT s.* FROM symbols s
+                LEFT JOIN symbols c ON s.container_id = c.id
+                WHERE s.kind IN ('class', 'function')
+                  AND (c.id IS NULL OR c.kind = 'module')
+                  AND (s.name LIKE ? OR s.qualname LIKE ? OR s.path LIKE ?)
+                ORDER BY s.path, s.line
+                LIMIT ?
+                """,
+                (like, like, like, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT s.* FROM symbols s
+                LEFT JOIN symbols c ON s.container_id = c.id
+                WHERE s.kind IN ('class', 'function')
+                  AND (c.id IS NULL OR c.kind = 'module')
+                ORDER BY s.path, s.line
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._row_to_symbol(row) for row in rows]
+
     def relations_for(self, symbol_id: str, kind: RelationKind | str | None = None) -> list[dict[str, Any]]:
         if kind is None:
             rows = self._conn.execute(
