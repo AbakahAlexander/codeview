@@ -477,11 +477,30 @@ class JediPythonProvider(GraphProvider):
             if s.location.path == path
             and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CLASS}
             and s.location.line <= line
+            and (s.location.end_line is None or s.location.end_line >= line)
         ]
-        if not scoped:
-            return None
-        scoped.sort(key=lambda s: s.location.line, reverse=True)
-        return scoped[0]
+        if scoped:
+            scoped.sort(key=lambda s: (s.location.end_line or 10**9) - s.location.line)
+            return scoped[0]
+
+        # Fall back to nearest earlier function/method/class, then module.
+        earlier = [
+            s
+            for s in symbols_by_id.values()
+            if s.location.path == path
+            and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CLASS}
+            and s.location.line <= line
+        ]
+        if earlier:
+            earlier.sort(key=lambda s: s.location.line, reverse=True)
+            return earlier[0]
+
+        modules = [
+            s
+            for s in symbols_by_id.values()
+            if s.location.path == path and s.kind == SymbolKind.MODULE
+        ]
+        return modules[0] if modules else None
 
     def _references(
         self,
@@ -491,41 +510,82 @@ class JediPythonProvider(GraphProvider):
         *,
         as_called_by: bool,
     ) -> list[Relation]:
-        script = self._script(root, symbol.location.path)
+        # Jedi get_references() often misses cross-module usages in plain scripts.
+        # Scan the project with AST (+ optional Jedi goto confirmation) instead.
+        if as_called_by:
+            return self._find_callers(root, symbol, symbols_by_id)
+        return self._find_usages(root, symbol, symbols_by_id)
+
+    def _same_definition(
+        self,
+        root: Path,
+        rel_path: str,
+        line: int,
+        column: int,
+        symbol: Symbol,
+    ) -> bool:
+        script = self._script(root, rel_path)
         if not script:
-            return []
-        name = self._find_name(script, symbol)
-        if not name:
-            return []
+            # Fall back to name-only match when Jedi cannot load the file.
+            return True
         try:
-            refs = name.get_references()
+            defs = script.goto(line, column, follow_imports=True)
         except Exception:
-            return []
-
-        relations: list[Relation] = []
-        seen: set[tuple[str, str, int]] = set()
-        for ref in refs:
-            if not ref.module_path:
+            return True
+        if not defs:
+            # Imported names sometimes fail goto; keep name-matched call sites.
+            return True
+        for definition in defs:
+            if not definition.module_path:
                 continue
-            rel_path = _rel(root, Path(ref.module_path))
-            line = ref.line or 1
-            column = ref.column or 0
-            # Skip the definition itself.
+            def_rel = _rel(root, Path(definition.module_path))
             if (
-                rel_path == symbol.location.path
-                and line == symbol.location.line
-                and column == symbol.location.column
+                definition.name == symbol.name
+                and def_rel == symbol.location.path
+                and (definition.line or 1) == symbol.location.line
             ):
+                return True
+        return False
+
+    def _find_callers(
+        self,
+        root: Path,
+        symbol: Symbol,
+        symbols_by_id: dict[str, Symbol],
+    ) -> list[Relation]:
+        relations: list[Relation] = []
+        seen: set[tuple[str, int]] = set()
+
+        for path in _iter_python_files(root):
+            rel_path = _rel(root, path)
+            source = _read_text(path)
+            try:
+                tree = ast.parse(source, filename=rel_path)
+            except SyntaxError:
                 continue
 
-            if as_called_by:
-                is_call = self._is_call_site(root, rel_path, line, column, symbol.name)
-                if not is_call:
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
                     continue
+                call_name, col = self._call_locator(node)
+                if call_name != symbol.name:
+                    continue
+                line = getattr(node, "lineno", None)
+                if line is None:
+                    continue
+                column = col if col is not None else getattr(node, "col_offset", 0)
+
+                # Skip the definition line itself.
+                if rel_path == symbol.location.path and line == symbol.location.line:
+                    continue
+
+                if not self._same_definition(root, rel_path, line, column, symbol):
+                    continue
+
                 caller = self._enclosing_symbol(rel_path, line, symbols_by_id)
                 if not caller or caller.id == symbol.id:
                     continue
-                key = (caller.id, symbol.id, line)
+                key = (caller.id, line)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -537,14 +597,47 @@ class JediPythonProvider(GraphProvider):
                         location=Location(path=rel_path, line=line, column=column),
                     )
                 )
-            else:
-                key = (symbol.id, f"{rel_path}:{line}:{column}", line)
+        return relations
+
+    def _find_usages(
+        self,
+        root: Path,
+        symbol: Symbol,
+        symbols_by_id: dict[str, Symbol],
+    ) -> list[Relation]:
+        relations: list[Relation] = []
+        seen: set[tuple[str, int]] = set()
+        pattern_name = symbol.name
+
+        for path in _iter_python_files(root):
+            rel_path = _rel(root, path)
+            source = _read_text(path)
+            try:
+                tree = ast.parse(source, filename=rel_path)
+            except SyntaxError:
+                continue
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id == pattern_name:
+                    line = node.lineno
+                    column = node.col_offset
+                elif isinstance(node, ast.Attribute) and node.attr == pattern_name:
+                    line = node.lineno
+                    column = node.col_offset
+                else:
+                    continue
+
+                if rel_path == symbol.location.path and line == symbol.location.line:
+                    continue
+                if not self._same_definition(root, rel_path, line, column, symbol):
+                    continue
+
+                target = self._enclosing_symbol(rel_path, line, symbols_by_id)
+                to_id = target.id if target else symbol.id
+                key = (to_id, line)
                 if key in seen:
                     continue
                 seen.add(key)
-                # Point to enclosing symbol when possible so the UI can navigate.
-                target = self._enclosing_symbol(rel_path, line, symbols_by_id)
-                to_id = target.id if target else symbol.id
                 relations.append(
                     Relation(
                         kind=RelationKind.REFERENCES,
