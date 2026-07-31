@@ -1,0 +1,174 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from codeview.providers import list_providers
+from codeview.service import ExplorerService, default_db_path
+
+STATIC_DIR = Path(__file__).parent / "static"
+TEMPLATE_DIR = Path(__file__).parent / "templates"
+
+
+class IndexRequest(BaseModel):
+    path: str
+    provider: str = "jedi-python"
+    db: str | None = None
+
+
+class ExpandRequest(BaseModel):
+    symbol_id: str
+    kind: str
+
+
+class SavePathRequest(BaseModel):
+    name: str
+    steps: list[dict] = Field(default_factory=list)
+
+
+def create_app(service: ExplorerService | None = None) -> FastAPI:
+    service = service or ExplorerService()
+    app = FastAPI(title="Codeview", version="0.1.0")
+    app.state.service = service
+
+    @app.get("/", response_class=HTMLResponse)
+    def home() -> HTMLResponse:
+        html = (TEMPLATE_DIR / "index.html").read_text(encoding="utf-8")
+        return HTMLResponse(html)
+
+    @app.get("/api/health")
+    def health() -> dict:
+        store = service.store
+        return {
+            "ok": True,
+            "has_index": store is not None,
+            "stats": store.stats() if store else None,
+            "providers": list_providers(),
+        }
+
+    @app.get("/api/providers")
+    def providers() -> list[dict]:
+        return list_providers()
+
+    @app.post("/api/index")
+    def index_repo(body: IndexRequest) -> dict:
+        root = Path(body.path).expanduser()
+        if not root.exists():
+            raise HTTPException(status_code=400, detail=f"Path does not exist: {root}")
+        db = Path(body.db).expanduser() if body.db else default_db_path(root)
+        try:
+            stats = service.index_path(root, provider_name=body.provider, db_path=db)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"stats": stats.to_dict(), "db": str(db)}
+
+    @app.post("/api/open")
+    def open_db(body: dict) -> dict:
+        db = Path(str(body.get("db", ""))).expanduser()
+        if not db.exists():
+            raise HTTPException(status_code=404, detail=f"Database not found: {db}")
+        store = service.open(db)
+        return {"stats": store.stats(), "db": str(db)}
+
+    @app.get("/api/stats")
+    def stats() -> dict:
+        store = service.store
+        if not store:
+            return {"has_index": False}
+        return {"has_index": True, **store.stats(), "db": str(service.db_path)}
+
+    @app.get("/api/search")
+    def search(q: str, limit: int = 40) -> dict:
+        store = service.store
+        if not store:
+            raise HTTPException(status_code=400, detail="No index loaded")
+        hits = store.search(q, limit=limit)
+        return {"query": q, "results": [h.to_dict() for h in hits]}
+
+    @app.get("/api/symbol/{symbol_id}")
+    def get_symbol(symbol_id: str) -> dict:
+        store = service.store
+        if not store:
+            raise HTTPException(status_code=400, detail="No index loaded")
+        symbol = store.get_symbol(symbol_id)
+        if not symbol:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        structural = store.relations_for(symbol_id)
+        return {
+            "symbol": symbol.to_dict(),
+            "relations": structural,
+            "expanded": {
+                kind: store.is_expanded(symbol_id, kind)
+                for kind in (
+                    "calls",
+                    "called_by",
+                    "references",
+                    "parent_class",
+                    "child_class",
+                    "overrides",
+                    "overridden_by",
+                    "contains",
+                    "contained_in",
+                    "implements",
+                    "implemented_by",
+                )
+            },
+        }
+
+    @app.post("/api/expand")
+    def expand(body: ExpandRequest) -> dict:
+        if not service.store:
+            raise HTTPException(status_code=400, detail="No index loaded")
+        try:
+            relations = service.expand(body.symbol_id, body.kind)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        store = service.store
+        enriched = []
+        for rel in relations:
+            target = store.get_symbol(rel["to_id"])
+            enriched.append({**rel, "to_symbol": target.to_dict() if target else None})
+        return {"symbol_id": body.symbol_id, "kind": body.kind, "relations": enriched}
+
+    @app.get("/api/source/{symbol_id}")
+    def source(symbol_id: str) -> dict:
+        if not service.store:
+            raise HTTPException(status_code=400, detail="No index loaded")
+        try:
+            snippet = service.source(symbol_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return snippet.to_dict()
+
+    @app.get("/api/saved-paths")
+    def saved_paths() -> dict:
+        store = service.store
+        if not store:
+            return {"paths": []}
+        return {"paths": store.list_saved_paths()}
+
+    @app.post("/api/saved-paths")
+    def save_path(body: SavePathRequest) -> dict:
+        store = service.store
+        if not store:
+            raise HTTPException(status_code=400, detail="No index loaded")
+        path_id = store.save_path(body.name, body.steps)
+        return {"id": path_id}
+
+    @app.delete("/api/saved-paths/{path_id}")
+    def delete_path(path_id: int) -> dict:
+        store = service.store
+        if not store:
+            raise HTTPException(status_code=400, detail="No index loaded")
+        store.delete_saved_path(path_id)
+        return {"ok": True}
+
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    return app

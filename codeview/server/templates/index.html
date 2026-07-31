@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Codeview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <div class="brand-name">Codeview</div>
+          <div class="brand-sub" id="statusLine">No index loaded</div>
+        </div>
+      </div>
+      <div class="nav-controls">
+        <button type="button" id="backBtn" class="icon-btn" title="Back" disabled>←</button>
+        <button type="button" id="forwardBtn" class="icon-btn" title="Forward" disabled>→</button>
+      </div>
+      <nav class="breadcrumbs" id="breadcrumbs" aria-label="Exploration path"></nav>
+      <button type="button" id="savePathBtn" class="text-btn" disabled>Save path</button>
+    </header>
+
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Open project</h2>
+        <label class="field">
+          <span>Local path</span>
+          <input id="rootInput" type="text" placeholder="/path/to/python/repo" />
+        </label>
+        <label class="field">
+          <span>Provider</span>
+          <select id="providerSelect">
+            <option value="jedi-python">jedi-python</option>
+          </select>
+        </label>
+        <button type="button" id="indexBtn" class="primary-btn">Index &amp; load</button>
+        <p class="hint" id="indexHint">Indexes stay on disk in ~/.codeview/indexes. Nothing is uploaded.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Search symbols</h2>
+        <input id="searchInput" type="search" placeholder="Class, function, method…" disabled />
+        <ul id="searchResults" class="result-list"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Saved paths</h2>
+        <ul id="savedPaths" class="result-list"></ul>
+      </section>
+    </aside>
+
+    <main class="main">
+      <section class="focus-panel" id="focusPanel">
+        <div class="empty-state" id="emptyState">
+          <h1>Explore one symbol at a time</h1>
+          <p>Index a local Python codebase, search for a symbol, then expand only the relationships you need.</p>
+        </div>
+        <div id="symbolView" class="symbol-view hidden"></div>
+      </section>
+
+      <section class="source-panel">
+        <div class="source-header">
+          <h2>Source</h2>
+          <span id="sourcePath" class="muted"></span>
+        </div>
+        <pre id="sourceCode" class="source-code"><code>Select a symbol to view its definition.</code></pre>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
