@@ -374,7 +374,7 @@ class TreeSitterJavaProvider(GraphProvider):
                 for key in ("call.name", "call.ctor"):
                     for node in call_caps.get(key, []):
                         name = _text(source, node)
-                        for target in self._resolve_calls(name, rel, by_file_name, by_name):
+                        for target in self._resolve_calls_for_index(name, rel, by_file_name, by_name):
                             if target.id == method.id or target.id in seen_targets:
                                 continue
                             seen_targets.add(target.id)
@@ -392,21 +392,39 @@ class TreeSitterJavaProvider(GraphProvider):
                                 location=loc,
                             )
 
-    # Cap ambiguous name matches so indexing stays bounded, but never drop to zero when many exist.
+    # Cap how many same-name targets we attach per call site when expanding.
     MAX_NAME_MATCHES = 80
 
     @staticmethod
-    def _resolve_calls(
+    def _resolve_calls_for_index(
         name: str,
         rel_path: str,
         by_file_name: dict[tuple[str, str], list[Symbol]],
         by_name: dict[str, list[Symbol]],
     ) -> list[Symbol]:
+        """Index-time resolution: same-file always; otherwise only an unambiguous global name.
+
+        Ambiguous cross-file names are resolved at expand time so learners still see every
+        candidate without exploding the SQLite call graph during index.
+        """
         same = by_file_name.get((rel_path, name), [])
         if same:
             return same[: TreeSitterJavaProvider.MAX_NAME_MATCHES]
         matches = by_name.get(name, [])
-        return matches[: TreeSitterJavaProvider.MAX_NAME_MATCHES]
+        if len(matches) == 1:
+            return matches
+        return []
+
+    @staticmethod
+    def _resolve_calls_for_expand(
+        name: str,
+        rel_path: str,
+        by_name: dict[str, list[Symbol]],
+    ) -> list[Symbol]:
+        matches = by_name.get(name, [])
+        ordered = [m for m in matches if m.location.path == rel_path]
+        ordered.extend(m for m in matches if m.location.path != rel_path)
+        return ordered[: TreeSitterJavaProvider.MAX_NAME_MATCHES]
 
     def expand(
         self,
@@ -480,7 +498,8 @@ class TreeSitterJavaProvider(GraphProvider):
             for node in call_caps.get(key, []):
                 name = _text(source, node)
                 matches = by_name.get(name, [])
-                if not matches:
+                ordered = self._resolve_calls_for_expand(name, symbol.location.path, by_name)
+                if not ordered:
                     # Keep the call visible even when the target is outside the index slice.
                     target = Symbol(
                         id=_stable_id("unresolved", symbol.location.path, name, node.start_point[0]),
@@ -492,11 +511,8 @@ class TreeSitterJavaProvider(GraphProvider):
                         signature="unresolved call",
                     )
                     self.pending_symbols.append(target)
-                    matches = [target]
-                # Prefer same-file first, then all other same-name targets (do not hide ambiguity).
-                ordered = [m for m in matches if m.location.path == symbol.location.path]
-                ordered.extend(m for m in matches if m.location.path != symbol.location.path)
-                for target in ordered[: self.MAX_NAME_MATCHES]:
+                    ordered = [target]
+                for target in ordered:
                     if target.id == symbol.id or target.id in seen:
                         continue
                     seen.add(target.id)
