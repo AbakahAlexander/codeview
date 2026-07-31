@@ -42,6 +42,42 @@ SKIP_DIR_NAMES = {
 }
 
 
+def is_skipped_dir(path: Path) -> bool:
+    """True for VCS/build/cache dirs and any Python virtualenv (has pyvenv.cfg)."""
+    name = path.name
+    if name in SKIP_DIR_NAMES or name.startswith("."):
+        return True
+    try:
+        if path.is_dir() and (path / "pyvenv.cfg").is_file():
+            return True
+    except OSError:
+        return True
+    return False
+
+
+def path_is_skipped(path: Path) -> bool:
+    """True if any path component is a skipped / virtualenv directory."""
+    try:
+        parts = path.resolve().parts
+    except OSError:
+        parts = path.parts
+    # Fast name-based skip for known folders.
+    if any(part in SKIP_DIR_NAMES for part in parts):
+        return True
+    # Detect oddly named venvs: walk ancestors for pyvenv.cfg.
+    cur = path if path.is_dir() else path.parent
+    for _ in range(8):
+        try:
+            if (cur / "pyvenv.cfg").is_file():
+                return True
+        except OSError:
+            return True
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return False
+
+
 def stable_id(*parts: object) -> str:
     raw = "|".join(str(p) for p in parts)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -94,7 +130,7 @@ def browse(root: Path, rel: str, extensions: set[str]) -> list[Symbol]:
         return []
 
     for entry in entries:
-        if entry.name in SKIP_DIR_NAMES or entry.name.startswith("."):
+        if is_skipped_dir(entry):
             continue
         child_rel = rel_path(root, entry)
         if entry.is_dir():
@@ -122,7 +158,7 @@ def count_source_files(root: Path, extensions: set[str], limit: int = 5_000_000)
             count = 0
             for line in proc.stdout.splitlines():
                 suffix = Path(line).suffix.lower()
-                if suffix in extensions and not any(part in SKIP_DIR_NAMES for part in Path(line).parts):
+                if suffix in extensions and not path_is_skipped(root / line):
                     count += 1
                     if count >= limit:
                         break
@@ -133,7 +169,7 @@ def count_source_files(root: Path, extensions: set[str], limit: int = 5_000_000)
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        if any(part in SKIP_DIR_NAMES for part in path.parts):
+        if path_is_skipped(path):
             continue
         if path.suffix.lower() in extensions:
             count += 1

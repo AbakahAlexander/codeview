@@ -8,9 +8,18 @@ from typing import Iterable
 import jedi
 from jedi.api.classes import Name
 
-from codeview.fsutil import SKIP_DIR_NAMES as SKIP_DIRS
+from codeview.fsutil import path_is_skipped
 from codeview.models import Location, Relation, RelationKind, SourceSnippet, Symbol, SymbolKind
 from codeview.providers.base import GraphProvider
+
+
+def _iter_python_files(root: Path) -> Iterable[Path]:
+    for path in sorted(root.rglob("*.py")):
+        if path_is_skipped(path):
+            continue
+        if not path.is_file():
+            continue
+        yield path
 
 
 def _stable_id(*parts: object) -> str:
@@ -23,15 +32,6 @@ def _rel(root: Path, path: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
-
-
-def _iter_python_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*.py")):
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if not path.is_file():
-            continue
-        yield path
 
 
 def _read_text(path: Path) -> str:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codeview.fsutil import SKIP_DIR_NAMES
+from codeview.fsutil import path_is_skipped
 
 # Extension → provider name. Browse-only extensions have no provider.
 PROVIDER_EXTENSIONS: dict[str, str] = {
@@ -95,7 +95,7 @@ def detect_providers(root: Path, *, sample_limit: int = 200_000) -> list[str]:
         nonlocal count
         if count >= sample_limit:
             return
-        if any(part in SKIP_DIR_NAMES for part in path.parts):
+        if path_is_skipped(path):
             return
         if not path.is_file():
             return

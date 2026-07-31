@@ -8,7 +8,7 @@ from typing import Iterable
 from tree_sitter import Language, Node, Parser, Query, QueryCursor
 import tree_sitter_java as tsjava
 
-from codeview.fsutil import SKIP_DIR_NAMES as SKIP_DIRS
+from codeview.fsutil import path_is_skipped
 from codeview.models import Location, Relation, RelationKind, SourceSnippet, Symbol, SymbolKind
 from codeview.providers.base import GraphProvider
 
@@ -60,7 +60,7 @@ def _rel(root: Path, path: Path) -> str:
 
 def _iter_java_files(root: Path) -> Iterable[Path]:
     for path in sorted(root.rglob("*.java")):
-        if any(part in SKIP_DIRS for part in path.parts):
+        if path_is_skipped(path):
             continue
         if path.is_file():
             yield path

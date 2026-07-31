@@ -8,7 +8,7 @@ from typing import Iterable
 from tree_sitter import Language, Node, Parser, Query, QueryCursor
 import tree_sitter_cpp as tscpp
 
-from codeview.fsutil import SKIP_DIR_NAMES as SKIP_DIRS, rg_call_sites
+from codeview.fsutil import path_is_skipped, rg_call_sites
 from codeview.models import Location, Relation, RelationKind, SourceSnippet, Symbol, SymbolKind
 from codeview.providers.base import GraphProvider
 
