@@ -19,6 +19,11 @@ pipx install 'git+https://github.com/AbakahAlexander/codeview.git'
 Requires Python 3.10+ and `git`. **ripgrep is fetched automatically** on first
 use into `~/.codeview/bin` (or reused from PATH if already installed).
 
+Default indexing aims to **just work**: `codeview serve .` builds a usable index
+without asking you to learn SCIP. When an `index.scip` is present, Codeview uses
+it for higher precision. Heuristic callers skip definition lines (so Alembic-style
+`def downgrade():` is not treated as a call).
+
 ## Quick start
 
 ```bash

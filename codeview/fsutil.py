@@ -214,8 +214,28 @@ def rg_files(root: Path, query: str, globs: list[str], limit: int = 40) -> list[
     return out
 
 
+def _line_looks_like_definition(line: str, name: str) -> bool:
+    """True for `def name(`, `fn name(`, etc. — not real call sites."""
+    return bool(
+        re.search(
+            rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+            rf"(?:def|fn|fun|function|func|method)\s+{re.escape(name)}\s*\(",
+            line,
+        )
+    ) or bool(
+        # C/Java-style: type ... name( at start of a declaration-ish line without a prior call.
+        # Keep conservative: only skip when the name( is the declarator after common keywords.
+        re.search(
+            rf"(?m)^\s*(?:public|private|protected|static|final|inline|virtual|override|export|async)?\s*"
+            rf"(?:[\w:<>\*\&\s]+)?\b{re.escape(name)}\s*\([^;]*\)\s*(?:\{{|:)?\s*$",
+            line,
+        )
+        and not re.search(r"\b(?:return|if|while|for|switch|case|throw|yield|await|new)\b", line)
+    )
+
+
 def rg_call_sites(root: Path, name: str, globs: list[str], limit: int = 80) -> list[tuple[str, int]]:
-    """Find approximate call sites for name( ... )."""
+    """Find approximate call sites for name( ... ), skipping definition lines."""
     pattern = rf"\b{re.escape(name)}\s*\("
     cmd = [
         _rg_bin(),
@@ -225,6 +245,7 @@ def rg_call_sites(root: Path, name: str, globs: list[str], limit: int = 80) -> l
         pattern,
         *sum((["-g", g] for g in globs), []),
         *sum((["-g", f"!{d}/**"] for d in ("Documentation", "tools", "samples", "scripts")), []),
+        *sum((["-g", f"!{d}/**"] for d in ("env_backend", "venv", ".venv", "node_modules", "site-packages")), []),
         str(root),
     ]
     try:
@@ -239,6 +260,9 @@ def rg_call_sites(root: Path, name: str, globs: list[str], limit: int = 80) -> l
             continue
         path_str, line_str = parts[0], parts[1]
         if not line_str.isdigit():
+            continue
+        content = parts[2] if len(parts) > 2 else ""
+        if content and _line_looks_like_definition(content, name):
             continue
         p = Path(path_str)
         try:

@@ -601,11 +601,10 @@ class JediPythonProvider(GraphProvider):
         symbol: Symbol,
         symbols_by_id: dict[str, Symbol],
     ) -> list[Relation]:
-        """Find callers via ripgrep, then resolve enclosing symbols in hit files only."""
+        """Find callers via ripgrep + AST verification (real calls only, not def lines)."""
         relations: list[Relation] = []
         seen: set[tuple[str, int]] = set()
         hits = rg_call_sites(root, symbol.name, ["*.py"], limit=200)
-        # Group hits by file so we parse each file at most once.
         by_file: dict[str, list[int]] = {}
         for rel_path, line in hits:
             if path_is_skipped(root / rel_path):
@@ -615,7 +614,16 @@ class JediPythonProvider(GraphProvider):
             by_file.setdefault(rel_path, []).append(line)
 
         for rel_path, lines in by_file.items():
-            # Ensure we have symbols for this file to resolve enclosing functions.
+            source = _read_text(root / rel_path)
+            try:
+                tree = ast.parse(source, filename=rel_path)
+            except SyntaxError:
+                continue
+            call_lines = {
+                getattr(node, "lineno", -1)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and self._call_locator(node)[0] == symbol.name
+            }
             file_syms = [s for s in symbols_by_id.values() if s.location.path == rel_path]
             if not file_syms:
                 parsed, _ = self.parse_file(root, rel_path)
@@ -623,9 +631,15 @@ class JediPythonProvider(GraphProvider):
                 for s in parsed:
                     symbols_by_id[s.id] = s
             for line in lines:
+                if line not in call_lines:
+                    continue
                 caller = self._enclosing_symbol(rel_path, line, symbols_by_id)
                 if not caller or caller.id == symbol.id:
                     continue
+                # Same-named functions (e.g. many alembic downgrade) are not callers of each other.
+                if caller.name == symbol.name and caller.location.path != symbol.location.path:
+                    if caller.location.line == line:
+                        continue
                 key = (caller.id, line)
                 if key in seen:
                     continue
