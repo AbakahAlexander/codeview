@@ -14,7 +14,7 @@ Requires Python 3.10+ and `git`.
 
 ```bash
 codeview serve .
-# or
+# or for public repos you don't want to install locally:
 codeview serve https://github.com/OWNER/REPO
 ```
 
