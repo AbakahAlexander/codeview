@@ -246,10 +246,16 @@ async function loadBranches(symbol, container, ancestors = []) {
   container.innerHTML = "";
   const blocked = new Set(ancestors);
 
-  // For files, members = parse file contents.
+  // File modules: SCIP often has references/imports but empty contains/calls
+  // (typical for JS/TS bootstraps like main.tsx → <Game />).
   const kinds =
     symbol.kind === "module" && symbol.signature === "file"
-      ? [{ kind: "contains", label: "symbols" }]
+      ? [
+          { kind: "contains", label: "symbols" },
+          { kind: "references", label: "uses" },
+          { kind: "calls", label: "callees" },
+          { kind: "called_by", label: "callers" },
+        ]
       : BRANCHES;
 
   const results = await Promise.all(

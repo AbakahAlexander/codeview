@@ -12,7 +12,7 @@ No cloud. No AI. No IDE required.
 pipx install 'git+https://github.com/AbakahAlexander/codeview.git'
 ```
 
-Requires Python 3.10+, `git`, and a language toolchain for indexing (see docs).
+Requires Python 3.10+, `git`, and a language toolchain for indexing (Node for JS/TS, JDK for Java, … — see docs). Private git URLs work via your local git credentials.
 
 ## Use
 

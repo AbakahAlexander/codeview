@@ -1,6 +1,6 @@
 # Install
 
-Requires **Python 3.10+** and **git**. Indexers for some languages also need a **JDK** (Java) or a C/C++ toolchain (`compile_commands.json` / CMake).
+Requires **Python 3.10+** and **git**. Indexers for some languages also need **Node.js** / `npm` (JS/TS), a **JDK** (Java), or a C/C++ toolchain (`compile_commands.json` / CMake).
 
 ## Install
 

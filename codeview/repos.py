@@ -37,7 +37,11 @@ def repo_cache_dir(url: str) -> Path:
 
 
 def resolve_target(target: str | Path) -> Path:
-    """Resolve a local path or public git URL to a local directory."""
+    """Resolve a local path or git URL to a local directory.
+
+    Git URLs use the caller's ``git`` credentials (private repos work when
+    ``git clone`` would already succeed).
+    """
     if isinstance(target, Path):
         path = target.expanduser().resolve()
         if not path.is_dir():

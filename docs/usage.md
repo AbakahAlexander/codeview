@@ -13,7 +13,7 @@ The UI starts immediately. If an index is missing or outdated, Codeview builds i
 ## Navigate
 
 - Entry points appear first in the tree
-- Expand with `+` for callers / callees
+- Expand with `+` for members / callers / callees (file modules also show **uses** for imports)
 - Click a row to open source
 - On call edges: **call site** above, **definition** below
 
@@ -40,6 +40,6 @@ codeview doctor --purge      # wipe all Codeview data
 
 ## Git URL peeks
 
-`serve` / `index` on a public git URL shallow-clones under `~/.codeview/repos/`. When `serve` exits, that clone and its index/cache are removed. Shared indexer binaries in `~/.codeview/bin/` stay for reuse.
+`serve` / `index` on a git URL shallow-clones under `~/.codeview/repos/`. Private GitHub repos work when your machine can already `git clone` them (SSH key, `gh auth`, credential helper, …).
 
-Local paths are never deleted on exit.
+When `serve` exits, that clone and its index/cache are removed. Shared indexer binaries in `~/.codeview/bin/` stay for reuse. Local paths are never deleted on exit.

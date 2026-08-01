@@ -12,6 +12,7 @@ from codeview.detect import (
 )
 from codeview.entrypoints import (
     find_dunder_main_files,
+    find_js_ts_entry_files,
     parse_cmake_executable_sources,
     parse_project_scripts,
 )
@@ -426,6 +427,20 @@ class ExplorerService:
             if modules:
                 add(modules[0])
 
+        # JS/TS: HTML module scripts, package.json main/bin/exports, Vite/Next roots.
+        # Thin bootstraps (e.g. main.tsx → <Game />) often have references but no
+        # contains/calls on the file module — also surface the imported app symbols.
+        for rel in find_js_ts_entry_files(root):
+            entry = self._symbol_for_entry_file(rel)
+            add(entry)
+            if (
+                entry
+                and entry.kind == SymbolKind.MODULE
+                and entry.signature == "file"
+            ):
+                for target in self._entry_file_imports(entry, limit=5):
+                    add(target)
+
         # C/C++/CUDA/Java: ``main`` / ``WinMain`` are natural program starts
         # (libraries often have several — show them all, prefer non-test paths).
         native_mains: list[Symbol] = []
@@ -479,6 +494,85 @@ class ExplorerService:
                 add(mains[0])
 
         return found[:limit]
+
+    def _symbol_for_entry_file(self, rel: str) -> Symbol | None:
+        """Best indexed symbol for a source file treated as an entry point."""
+        store = self.ensure_store()
+        syms = store.symbols_in_path(rel)
+        if not syms:
+            return None
+        modules = [
+            s
+            for s in syms
+            if s.kind == SymbolKind.MODULE and s.signature == "file"
+        ]
+        if modules:
+            return modules[0]
+        stem = Path(rel).stem
+        preferred_names = {stem, "main", "Main", "App", "default", "run", "start"}
+        ranked: list[tuple[int, Symbol]] = []
+        for sym in syms:
+            if sym.kind not in {
+                SymbolKind.FUNCTION,
+                SymbolKind.METHOD,
+                SymbolKind.CLASS,
+                SymbolKind.INTERFACE,
+            }:
+                continue
+            score = 0
+            if sym.name == stem:
+                score += 4
+            if sym.name in preferred_names:
+                score += 2
+            ranked.append((score, sym))
+        ranked.sort(key=lambda item: (-item[0], item[1].location.line, item[1].name))
+        if ranked and ranked[0][0] > 0:
+            return ranked[0][1]
+        for sym in syms:
+            if sym.kind in {
+                SymbolKind.FUNCTION,
+                SymbolKind.METHOD,
+                SymbolKind.CLASS,
+                SymbolKind.INTERFACE,
+            }:
+                return sym
+        return syms[0]
+
+    def _entry_file_imports(self, module: Symbol, *, limit: int = 5) -> list[Symbol]:
+        """In-project functions/types a JS/TS entry file references (e.g. ``Game``)."""
+        store = self.ensure_store()
+        rows = store._conn.execute(
+            """
+            SELECT s.*
+            FROM relations r
+            JOIN symbols s ON s.id = r.to_id
+            WHERE r.from_id = ?
+              AND r.kind = 'references'
+              AND s.kind IN ('function', 'class', 'interface', 'method')
+              AND (s.signature IS NULL OR s.signature NOT IN ('external', 'file'))
+              AND s.path != ?
+            ORDER BY
+              CASE
+                WHEN s.name IN ('App', 'Main', 'Game', 'Root', 'Index') THEN 0
+                WHEN s.path LIKE 'src/components/%' OR s.path LIKE 'src/pages/%' THEN 1
+                ELSE 2
+              END,
+              s.path,
+              s.line
+            """,
+            (module.id, module.location.path),
+        ).fetchall()
+        out: list[Symbol] = []
+        seen: set[str] = set()
+        for row in rows:
+            sym = store._row_to_symbol(row)
+            if sym.id in seen:
+                continue
+            seen.add(sym.id)
+            out.append(sym)
+            if len(out) >= limit:
+                break
+        return out
 
     def _library_api_symbols(self, *, limit: int = 40) -> list[Symbol]:
         """Public API types for libraries with no ``main`` (e.g. Iceberg ``api/``)."""
@@ -578,8 +672,18 @@ class ExplorerService:
             if symbol.kind == SymbolKind.DIRECTORY:
                 return [], 0
 
-            if symbol.kind == SymbolKind.MODULE and symbol.signature == "file" and relation_kind == RelationKind.CONTAINS:
+            if symbol.kind == SymbolKind.MODULE and symbol.signature == "file":
                 store.mark_expanded(symbol_id, relation_kind)
+                if relation_kind == RelationKind.CONTAINS:
+                    enriched, total = store.relations_enriched(
+                        symbol_id, relation_kind, limit=limit
+                    )
+                    if total > 0:
+                        return enriched, total
+                    # SCIP often omits contains for script files — list defs in the file.
+                    return self._synthetic_file_contains(symbol, limit=limit)
+                if relation_kind == RelationKind.REFERENCES:
+                    return self._filtered_file_references(symbol_id, limit=limit)
                 return store.relations_enriched(symbol_id, relation_kind, limit=limit)
 
             # Precise indexes materialise edges at ingest time.
@@ -593,6 +697,64 @@ class ExplorerService:
 
             store.mark_expanded(symbol_id, relation_kind)
             return store.relations_enriched(symbol_id, relation_kind, limit=limit)
+
+    def _synthetic_file_contains(
+        self, symbol: Symbol, *, limit: int = 80
+    ) -> tuple[list[dict], int]:
+        store = self.ensure_store()
+        kids = [
+            s
+            for s in store.symbols_in_path(symbol.location.path)
+            if s.id != symbol.id
+            and s.kind
+            in {
+                SymbolKind.FUNCTION,
+                SymbolKind.METHOD,
+                SymbolKind.CLASS,
+                SymbolKind.INTERFACE,
+                SymbolKind.VARIABLE,
+            }
+            and s.signature != "external"
+        ]
+        enriched = [
+            {
+                "kind": RelationKind.CONTAINS.value,
+                "from_id": symbol.id,
+                "to_id": kid.id,
+                "location": kid.location.to_dict(),
+                "meta": {},
+                "lazy": False,
+                "to_symbol": kid.to_dict(),
+            }
+            for kid in kids[:limit]
+        ]
+        return enriched, len(kids)
+
+    def _filtered_file_references(
+        self, symbol_id: str, *, limit: int = 80
+    ) -> tuple[list[dict], int]:
+        """References from a file module, skipping externals and module noise."""
+        store = self.ensure_store()
+        enriched, _total = store.relations_enriched(
+            symbol_id, RelationKind.REFERENCES, limit=max(limit * 4, 80)
+        )
+        filtered: list[dict] = []
+        seen: set[str] = set()
+        for rel in enriched:
+            target = rel.get("to_symbol") or {}
+            tid = target.get("id")
+            if not tid or tid in seen:
+                continue
+            kind = target.get("kind")
+            if kind not in {"function", "method", "class", "interface"}:
+                continue
+            if target.get("signature") in {"external", "file"}:
+                continue
+            seen.add(tid)
+            filtered.append(rel)
+            if len(filtered) >= limit:
+                break
+        return filtered, len(filtered)
 
     def source(
         self,
