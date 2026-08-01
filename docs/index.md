@@ -24,8 +24,12 @@ codeview serve https://github.com/OWNER/REPO
 
 - Tree rooted at **entry points**, not a file dump
 - Callers / callees with **call site** and **definition** side by side
-- Precise indexes via SCIP (downloaded on demand per language)
+- Precise indexes via [SCIP](https://github.com/sourcegraph/scip) (indexers downloaded on demand)
 - Data under `~/.codeview/` — yours alone
+
+## Credits
+
+Codeview builds on **[SCIP](https://github.com/sourcegraph/scip)** (Source Code Intelligence Protocol) and language indexers such as [`scip-python`](https://github.com/sourcegraph/scip-python), [`scip-java`](https://github.com/sourcegraph/scip-java), and [`scip-clang`](https://github.com/sourcegraph/scip-clang). Those tools produce the precise symbol graph; Codeview stores and explores it locally.
 
 ## Docs vs install
 

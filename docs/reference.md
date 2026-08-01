@@ -1,5 +1,11 @@
 # Reference
 
+## SCIP
+
+Codeview does not invent its own language analysis. It runs **[SCIP](https://github.com/sourcegraph/scip)** indexers, ingests the resulting `index.scip`, and serves exploration from a local SQLite graph.
+
+Upstream projects: [SCIP](https://github.com/sourcegraph/scip), [scip-python](https://github.com/sourcegraph/scip-python), [scip-java](https://github.com/sourcegraph/scip-java), [scip-clang](https://github.com/sourcegraph/scip-clang), and related indexers for other languages.
+
 ## Languages
 
 Indexed via SCIP when detection finds sources (dominant language first):
