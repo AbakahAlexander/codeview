@@ -21,7 +21,16 @@
     </div>
     <div class="src-pane">
       <div id="srcMeta" class="src-meta"></div>
-      <pre id="src"><code></code></pre>
+      <div id="srcPanels" class="src-panels">
+        <section class="src-block" id="srcCallBlock" hidden>
+          <div class="src-label" id="srcCallLabel">call site</div>
+          <pre class="src" id="srcCall"></pre>
+        </section>
+        <section class="src-block" id="srcDefBlock">
+          <div class="src-label" id="srcDefLabel">definition</div>
+          <pre class="src" id="srcDef"></pre>
+        </section>
+      </div>
     </div>
   </div>
   <script src="/static/app.js"></script>

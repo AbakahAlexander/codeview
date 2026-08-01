@@ -11,9 +11,10 @@ from codeview.providers import list_providers
 from codeview.service import ExplorerService, default_db_path
 
 
+# UI lives under codeview/frontend/ (not server/) — keep a single copy to avoid drift.
 _FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
-STATIC_DIR = _FRONTEND / "static" if (_FRONTEND / "static").is_dir() else Path(__file__).parent / "static"
-TEMPLATE_DIR = _FRONTEND / "templates" if (_FRONTEND / "templates").is_dir() else Path(__file__).parent / "templates"
+STATIC_DIR = _FRONTEND / "static"
+TEMPLATE_DIR = _FRONTEND / "templates"
 
 
 class IndexRequest(BaseModel):
