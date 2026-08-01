@@ -26,7 +26,7 @@ from codeview.store import SymbolStore
 
 
 # Bump when SCIP→SQLite mapping / call-edge rules change so stale DBs rebuild.
-GRAPH_SCHEMA_VERSION = "5"
+GRAPH_SCHEMA_VERSION = "6"
 
 LAZY_KINDS = (
     RelationKind.CALLS,
@@ -181,9 +181,9 @@ class ExplorerService:
             progress(8, "Building index…")
             path = generate_scip(root, out_path=cached, on_progress=on_progress)
         else:
-            progress(80, "Loading index…")
+            progress(70, "Loading cached index…")
 
-        progress(85, "Importing…")
+        progress(92, "Importing symbols…")
         # Build into a side DB so the live UI can keep serving the old graph.
         building = Path(str(db_path) + ".building")
         if building.exists():
@@ -206,6 +206,7 @@ class ExplorerService:
         if db_path.exists():
             db_path.unlink()
         building.replace(db_path)
+        progress(97, "Opening index…")
         self.open(db_path)
         progress(100, "Done")
         return stats
@@ -425,26 +426,47 @@ class ExplorerService:
             if modules:
                 add(modules[0])
 
-        # C/C++/CUDA: ``main`` / ``WinMain`` are natural program starts.
+        # C/C++/CUDA/Java: ``main`` / ``WinMain`` are natural program starts
+        # (libraries often have several — show them all, prefer non-test paths).
         native_mains: list[Symbol] = []
         for name in ("main", "WinMain", "wWinMain"):
-            for sym in store.search(name, limit=40):
+            for sym in store.search(name, limit=80):
                 if sym.name != name:
                     continue
                 if sym.kind not in {SymbolKind.FUNCTION, SymbolKind.METHOD}:
                     continue
                 ext = Path(sym.location.path).suffix.lower()
-                if ext in {".c", ".cc", ".cpp", ".cxx", ".cu", ".h", ".hpp", ".cuh"}:
+                if ext in {
+                    ".c",
+                    ".cc",
+                    ".cpp",
+                    ".cxx",
+                    ".cu",
+                    ".h",
+                    ".hpp",
+                    ".cuh",
+                    ".java",
+                    ".kt",
+                    ".kts",
+                    ".scala",
+                }:
                     native_mains.append(sym)
         native_mains.sort(
             key=lambda s: (
                 0 if not s.location.path.replace("\\", "/").startswith("tests/") else 1,
+                0 if "/test/" not in s.location.path.replace("\\", "/").lower() else 1,
                 0 if not s.location.path.replace("\\", "/").startswith("benchmarks/") else 1,
                 s.location.path,
             )
         )
         for sym in native_mains:
             add(sym)
+
+        # JVM / library surface: when there is no ``main``, start from the
+        # public API module (api/src/main/java, src/main/java, …).
+        if not found:
+            for sym in self._library_api_symbols(limit=limit):
+                add(sym)
 
         # CMake add_executable sources: attach each TU's ``main`` when present.
         for rel in parse_cmake_executable_sources(root):
@@ -457,6 +479,49 @@ class ExplorerService:
                 add(mains[0])
 
         return found[:limit]
+
+    def _library_api_symbols(self, *, limit: int = 40) -> list[Symbol]:
+        """Public API types for libraries with no ``main`` (e.g. Iceberg ``api/``)."""
+        store = self.ensure_store()
+        rows = store._conn.execute(
+            """
+            SELECT * FROM symbols
+            WHERE kind IN ('class', 'interface')
+              AND (
+                path LIKE '%/api/src/main/java/%'
+                OR path LIKE '%/api/src/main/kotlin/%'
+                OR path LIKE 'api/src/main/java/%'
+                OR path LIKE 'src/main/java/%'
+                OR path LIKE 'lib/src/main/java/%'
+              )
+              AND path NOT LIKE '%/test/%'
+              AND path NOT LIKE '%/tests/%'
+            ORDER BY
+              CASE
+                WHEN path LIKE '%/api/src/main/%' OR path LIKE 'api/src/main/%' THEN 0
+                ELSE 1
+              END,
+              length(path),
+              name
+            LIMIT ?
+            """,
+            (max(limit * 8, 80),),
+        ).fetchall()
+        # Prefer the type that matches the filename (Table.java → Table),
+        # so JDK noise nested in the same SCIP document does not flood the tree.
+        primary: list[Symbol] = []
+        seen_paths: set[str] = set()
+        fallback: list[Symbol] = []
+        for row in rows:
+            sym = store._row_to_symbol(row)
+            stem = Path(sym.location.path).stem
+            if sym.name == stem and sym.location.path not in seen_paths:
+                seen_paths.add(sym.location.path)
+                primary.append(sym)
+            elif sym.location.path not in seen_paths:
+                fallback.append(sym)
+        out = primary + [s for s in fallback if s.location.path not in {p.location.path for p in primary}]
+        return out[:limit]
 
     def browse(self, path: str = "") -> list[Symbol]:
         store = self.ensure_store()

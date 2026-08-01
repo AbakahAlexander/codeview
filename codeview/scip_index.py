@@ -213,22 +213,104 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
-def _run(cmd: list[str], *, cwd: Path, env: dict | None = None, timeout: int = 3600) -> None:
+def _run(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    env: dict | None = None,
+    timeout: int = 3600,
+    on_progress: ProgressCb | None = None,
+    progress_start: int = 30,
+    progress_end: int = 88,
+    progress_label: str = "Indexing…",
+) -> None:
+    """Run a subprocess; optionally stream live percent/message updates."""
     merged = os.environ.copy()
     if env:
         merged.update(env)
-    proc = subprocess.run(
+
+    if on_progress is None:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=merged,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+            raise RuntimeError(err[:2000])
+        return
+
+    import re
+    import threading
+
+    proc = subprocess.Popen(
         cmd,
         cwd=str(cwd),
         env=merged,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        timeout=timeout,
-        check=False,
+        bufsize=1,
     )
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
-        raise RuntimeError(err[:2000])
+    assert proc.stdout is not None
+    started = time.time()
+    last_line = progress_label
+    stop = threading.Event()
+    pct_re = re.compile(r"(\d{1,3})\s*%")
+
+    def reader() -> None:
+        nonlocal last_line
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+            # Skip curl/progress-meter noise and blank Gradle chatter.
+            low = line.lower()
+            if " --:--:--" in line or line.startswith("% Total"):
+                continue
+            if low.startswith("to honour the jvm settings"):
+                continue
+            if "configuration on demand is an incubating feature" in low:
+                continue
+            last_line = line[:160]
+
+    def heartbeat() -> None:
+        while not stop.wait(0.35):
+            elapsed = time.time() - started
+            # Climb from progress_start → progress_end while the tool runs.
+            # Faster early movement, then asymptote (unknown-length jobs).
+            span = max(1, progress_end - progress_start)
+            frac = 1.0 - (1.0 / (1.0 + elapsed / 12.0))
+            pct = progress_start + int(span * frac)
+            m = pct_re.search(last_line)
+            if m:
+                reported = min(99, int(m.group(1)))
+                pct = progress_start + int(span * (reported / 100.0))
+            label = last_line or progress_label
+            on_progress(min(progress_end, pct), f"{label} · {int(elapsed)}s")
+
+    t_read = threading.Thread(target=reader, name="codeview-index-out", daemon=True)
+    t_beat = threading.Thread(target=heartbeat, name="codeview-index-beat", daemon=True)
+    on_progress(progress_start, progress_label)
+    t_read.start()
+    t_beat.start()
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        stop.set()
+        raise RuntimeError(f"Timed out after {timeout}s: {' '.join(cmd[:3])}") from exc
+    finally:
+        stop.set()
+        t_read.join(timeout=2)
+        t_beat.join(timeout=2)
+
+    if rc != 0:
+        raise RuntimeError((last_line or f"exit {rc}")[:2000])
 
 
 def _npm() -> str:
@@ -283,6 +365,10 @@ def _index_python(root: Path, out: Path, progress: ProgressCb) -> Path:
         [exe, "index", ".", "--project-name", name, "--project-version", "_"],
         cwd=root,
         timeout=3600,
+        on_progress=progress,
+        progress_start=30,
+        progress_end=90,
+        progress_label="Indexing Python…",
     )
     return _move_scip_output(root, out)
 
@@ -294,7 +380,15 @@ def _index_typescript(root: Path, out: Path, progress: ProgressCb) -> Path:
         bin_path = _ensure_npm_package("@sourcegraph/scip-typescript", "scip-typescript")
         exe = str(bin_path)
     progress(30, "Indexing JavaScript/TypeScript…")
-    _run([exe, "index"], cwd=root, timeout=3600)
+    _run(
+        [exe, "index"],
+        cwd=root,
+        timeout=3600,
+        on_progress=progress,
+        progress_start=30,
+        progress_end=90,
+        progress_label="Indexing JavaScript/TypeScript…",
+    )
     return _move_scip_output(root, out)
 
 
@@ -303,7 +397,15 @@ def _index_go(root: Path, out: Path, progress: ProgressCb) -> Path:
     if not exe:
         raise RuntimeError("scip-go not found on PATH")
     progress(30, "Indexing Go…")
-    _run([exe, "index", "."], cwd=root, timeout=3600)
+    _run(
+        [exe, "index", "."],
+        cwd=root,
+        timeout=3600,
+        on_progress=progress,
+        progress_start=30,
+        progress_end=90,
+        progress_label="Indexing Go…",
+    )
     return _move_scip_output(root, out)
 
 
@@ -311,7 +413,51 @@ def _index_jvm(root: Path, out: Path, progress: ProgressCb) -> Path:
     progress(15, "Preparing JVM indexer…")
     exe = _ensure_scip_java()
     progress(30, "Indexing JVM sources…")
-    _run([exe, "index"], cwd=root, timeout=7200)
+    cmd = [exe, "index", f"--output={out}"]
+    # Large multi-module Gradle repos (Iceberg, Spark connectors, …) often fail
+    # configuring optional Spark/Flink matrices or test compilation under the
+    # SemanticDB plugin. Prefer main sources with empty version matrices.
+    if (root / "gradlew").is_file() or (root / "build.gradle").is_file() or (
+        root / "build.gradle.kts"
+    ).is_file():
+        cmd.extend(
+            [
+                "--",
+                "-DsparkVersions=",
+                "-DflinkVersions=",
+                "-DkafkaVersions=",
+                "-x",
+                "compileTestJava",
+                "-x",
+                "test",
+            ]
+        )
+    try:
+        _run(
+            cmd,
+            cwd=root,
+            timeout=7200,
+            on_progress=progress,
+            progress_start=30,
+            progress_end=90,
+            progress_label="Indexing JVM sources…",
+        )
+    except RuntimeError as first:
+        # Plain retry without Gradle flags (Maven / simple Gradle).
+        if len(cmd) == 3:
+            raise
+        progress(32, f"Retrying JVM index (simple): {str(first)[:80]}")
+        _run(
+            [exe, "index", f"--output={out}"],
+            cwd=root,
+            timeout=7200,
+            on_progress=progress,
+            progress_start=35,
+            progress_end=90,
+            progress_label="Indexing JVM sources…",
+        )
+    if out.is_file():
+        return out
     return _move_scip_output(root, out)
 
 
@@ -534,6 +680,10 @@ def _index_clang(root: Path, out: Path, progress: ProgressCb) -> Path:
         ],
         cwd=root,
         timeout=3600,
+        on_progress=progress,
+        progress_start=30,
+        progress_end=90,
+        progress_label="Indexing C/C++…",
     )
     if out.is_file():
         return out

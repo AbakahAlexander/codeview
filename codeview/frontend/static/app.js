@@ -401,7 +401,7 @@ async function pollIndexUntilReady() {
     } else {
       els.tree.innerHTML = `<li class="empty">${esc(st.message || "Indexing…")} ${st.percent || 0}%</li>`;
     }
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise((r) => setTimeout(r, 350));
   }
 }
 
