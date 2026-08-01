@@ -334,12 +334,160 @@ def _index_ruby(root: Path, out: Path, progress: ProgressCb) -> Path:
     return _move_scip_output(root, out)
 
 
-def _index_clang(root: Path, out: Path, progress: ProgressCb) -> Path:
+SCIP_CLANG_VERSION = "v0.4.0"
+
+
+def _ensure_scip_clang() -> str:
+    """Locate scip-clang on PATH or download a release binary into ~/.codeview/bin."""
     exe = _which("scip-clang")
-    if not exe:
-        raise RuntimeError("scip-clang not found on PATH")
+    if exe:
+        return exe
+    dest = bin_dir() / "scip-clang"
+    if dest.is_file() and os.access(dest, os.X_OK):
+        return str(dest)
+
+    import platform
+    import urllib.request
+
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"} and system == "linux":
+        asset = "scip-clang-x86_64-linux"
+    elif machine in {"aarch64", "arm64"} and system == "darwin":
+        asset = "scip-clang-arm64-darwin"
+    elif machine in {"x86_64", "amd64"} and system == "darwin":
+        asset = "scip-clang-x86_64-darwin"
+    else:
+        raise RuntimeError(
+            "scip-clang is not available for this platform; install it manually from "
+            "https://github.com/sourcegraph/scip-clang/releases"
+        )
+
+    url = (
+        f"https://github.com/sourcegraph/scip-clang/releases/download/"
+        f"{SCIP_CLANG_VERSION}/{asset}"
+    )
+    bin_dir().mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".download")
+    try:
+        urllib.request.urlretrieve(url, tmp)
+        tmp.chmod(0o755)
+        tmp.replace(dest)
+    except Exception as exc:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to download scip-clang: {exc}") from exc
+    return str(dest)
+
+
+def _find_compdb(root: Path) -> Path | None:
+    for rel in (
+        "compile_commands.json",
+        "build/compile_commands.json",
+        "cmake-build-debug/compile_commands.json",
+        "cmake-build-release/compile_commands.json",
+        "out/compile_commands.json",
+    ):
+        path = root / rel
+        if path.is_file():
+            return path
+    return None
+
+
+def _try_cmake_compdb(root: Path, progress: ProgressCb) -> Path | None:
+    """Configure with CMAKE_EXPORT_COMPILE_COMMANDS when CMakeLists.txt exists."""
+    if not (root / "CMakeLists.txt").is_file():
+        return None
+    cmake = _which("cmake")
+    if not cmake:
+        return None
+    build = root / ".codeview-build"
+    progress(22, "Generating compile_commands.json (CMake)…")
+    build.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [cmake, "-B", str(build), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", str(root)],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    candidate = build / "compile_commands.json"
+    if candidate.is_file():
+        return candidate
+    # CMake may fail (e.g. missing CUDA) — caller can synthesize a fallback.
+    err = (proc.stderr or proc.stdout or "").strip().splitlines()
+    if err:
+        progress(24, f"CMake configure skipped: {err[-1][:120]}")
+    return None
+
+
+def _synthesize_compdb(root: Path) -> Path:
+    """Best-effort compile_commands.json from source files (no full build required)."""
+    import json
+
+    compiler = _which("clang++") or _which("g++") or _which("c++")
+    if not compiler:
+        raise RuntimeError(
+            "Need clang++ or g++ on PATH to index C/C++ without a compile_commands.json"
+        )
+    cxx_ext = {".c", ".cc", ".cpp", ".cxx", ".cu"}
+    entries: list[dict[str, str]] = []
+    include_flags: list[str] = []
+    for inc in ("include", "src", "lib", "third_party"):
+        if (root / inc).is_dir():
+            include_flags.extend(["-I", str(root / inc)])
+
+    skip_parts = {".codeview-build", "CMakeFiles", "build", ".git"}
+    for path in sorted(root.rglob("*")):
+        if path.suffix.lower() not in cxx_ext or not path.is_file():
+            continue
+        if path_is_skipped(path):
+            continue
+        if any(part in skip_parts for part in path.parts):
+            continue
+        rel = path.relative_to(root).as_posix()
+        # Skip CUDA unless clang is present (scip-clang needs it for .cu).
+        if path.suffix.lower() == ".cu" and not _which("clang"):
+            continue
+        cmd = [compiler, "-std=c++17", "-c", rel, *include_flags]
+        entries.append(
+            {
+                "directory": str(root),
+                "file": rel,
+                "arguments": cmd,
+            }
+        )
+    if not entries:
+        raise RuntimeError("No C/C++ source files found to index")
+    out = root / ".codeview-compile_commands.json"
+    out.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    return out
+
+
+def _index_clang(root: Path, out: Path, progress: ProgressCb) -> Path:
+    progress(15, "Preparing C/C++ indexer…")
+    exe = _ensure_scip_clang()
+    progress(20, "Resolving compilation database…")
+    compdb = _find_compdb(root)
+    if compdb is None:
+        compdb = _try_cmake_compdb(root, progress)
+    if compdb is None:
+        progress(25, "Synthesizing compile_commands.json…")
+        compdb = _synthesize_compdb(root)
     progress(30, "Indexing C/C++…")
-    _run([exe, "index"], cwd=root, timeout=3600)
+    # scip-clang must be invoked from the project root with an explicit compdb.
+    _run(
+        [
+            exe,
+            f"--compdb-path={compdb}",
+            f"--index-output-path={out}",
+        ],
+        cwd=root,
+        timeout=3600,
+    )
+    if out.is_file():
+        return out
     return _move_scip_output(root, out)
 
 

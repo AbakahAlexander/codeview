@@ -25,7 +25,13 @@ def _stable_id(*parts: object) -> str:
 def _descriptor_tail(scip_symbol: str) -> str:
     if not scip_symbol or scip_symbol.startswith("local "):
         return scip_symbol
-    return scip_symbol.rsplit("/", 1)[-1]
+    # Nested descriptors use `/` (e.g. type#method or file/local).
+    if "/" in scip_symbol:
+        return scip_symbol.rsplit("/", 1)[-1]
+    # Top-level symbols: "cxx . . $ main(deadbeef)."
+    if " $ " in scip_symbol:
+        return scip_symbol.rsplit(" $ ", 1)[-1]
+    return scip_symbol
 
 
 def _parse_symbol(scip_symbol: str) -> tuple[str, SymbolKind, bool]:
@@ -38,6 +44,15 @@ def _parse_symbol(scip_symbol: str) -> tuple[str, SymbolKind, bool]:
     if re.search(r"\(\)\.\([^)]+\)$", tail):
         name = tail.rsplit(".(", 1)[-1].rstrip(")")
         return name or "param", SymbolKind.PARAMETER, False
+
+    # Methods / functions may include a SCIP disambiguator: name(deadbeef).
+    m = re.match(r"^([^#]+)#([^#.]+)\([^)]*\)\.$", tail)
+    if m:
+        return m.group(2), SymbolKind.METHOD, True
+
+    m = re.match(r"^([^#.]+)\([^)]*\)\.$", tail)
+    if m:
+        return m.group(1), SymbolKind.FUNCTION, True
 
     m = re.match(r"^([^#]+)#([^#.]+)\(\)\.$", tail)
     if m:
@@ -73,6 +88,18 @@ def _enclosing_type_name(scip_symbol: str) -> str | None:
     tail = _descriptor_tail(scip_symbol)
     m = re.match(r"^([^#]+)#", tail)
     return m.group(1) if m else None
+
+
+def _definition_path_rank(path: str) -> int:
+    """Lower is better when the same SCIP symbol is defined in multiple files."""
+    p = path.replace("\\", "/").lstrip("./")
+    if p.startswith("tests/") or "/tests/" in p:
+        return 3
+    if p.startswith("benchmarks/") or "/benchmarks/" in p:
+        return 2
+    if ".codeview" in p or "CMakeFiles" in p:
+        return 4
+    return 0
 
 
 def _looks_like_call(line_text: str, name: str) -> bool:
@@ -235,6 +262,22 @@ class ScipProvider(GraphProvider):
                     docstring="\n".join(docs) if docs else None,
                     container_id=module_id,
                 )
+                # Same SCIP symbol can be defined in many TUs (e.g. int main()).
+                # Prefer project sources over tests/benchmarks for the canonical row.
+                prev = self._by_scip.get(scip_sym)
+                if prev is not None:
+                    if _definition_path_rank(prev.location.path) <= _definition_path_rank(rel):
+                        continue
+                    prev.location = Location(path=rel, line=line, column=col)
+                    prev.container_id = module_id
+                    prev.name = display
+                    prev.kind = kind
+                    if signature:
+                        prev.signature = signature
+                    file_syms.append((prev, navigable))
+                    if kind == SymbolKind.CLASS:
+                        type_by_file[(rel, display)] = prev
+                    continue
                 symbols.append(sym)
                 file_syms.append((sym, navigable))
                 self._by_scip[scip_sym] = sym

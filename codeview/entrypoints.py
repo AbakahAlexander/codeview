@@ -127,3 +127,38 @@ def find_dunder_main_files(root: Path, *, limit: int = 200) -> list[str]:
             if len(found) >= limit:
                 break
     return found
+
+
+def parse_cmake_executable_sources(root: Path, *, limit: int = 80) -> list[str]:
+    """Relative source paths named in ``add_executable(...)`` blocks."""
+    path = root / "CMakeLists.txt"
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(
+        r"add_executable\s*\((.*?)\)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        body = match.group(1)
+        tokens = re.findall(
+            r"[A-Za-z0-9_./+\-]+\.(?:cu|cuh|cpp|cxx|cc|mm|m|c)(?![A-Za-z])",
+            body,
+        )
+        for tok in tokens:
+            rel = tok.lstrip("./")
+            if rel in seen:
+                continue
+            if not (root / rel).is_file():
+                continue
+            seen.add(rel)
+            out.append(rel)
+            if len(out) >= limit:
+                return out
+    return out

@@ -390,7 +390,11 @@ async function pollIndexUntilReady() {
       }
       return;
     }
-    if (phase === "error") return;
+    if (phase === "error") {
+      const err = st.error || st.message || "index failed";
+      els.tree.innerHTML = `<li class="empty">${esc(err)}</li>`;
+      return;
+    }
     // While indexing, show whatever graph already exists.
     if (st.has_graph) {
       await loadTree();
@@ -405,6 +409,12 @@ async function init() {
   try {
     const stats = await api("/api/stats");
     const st = stats.index_status || (await api("/api/index-status"));
+    if (st && st.status === "error") {
+      const err = st.error || st.message || "index failed";
+      els.status.textContent = err;
+      els.tree.innerHTML = `<li class="empty">${esc(err)}</li>`;
+      return;
+    }
     if (st && st.status === "indexing") {
       if (stats.has_index && (stats.symbol_count || 0) > 0) {
         els.status.textContent = `${stats.symbol_count} symbols · updating…`;

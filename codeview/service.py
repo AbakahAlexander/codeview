@@ -10,7 +10,11 @@ from codeview.detect import (
     provider_name_for_path,
     provider_name_for_symbol_language,
 )
-from codeview.entrypoints import find_dunder_main_files, parse_project_scripts
+from codeview.entrypoints import (
+    find_dunder_main_files,
+    parse_cmake_executable_sources,
+    parse_project_scripts,
+)
 from codeview.fsutil import browse, count_source_files
 from codeview.models import IndexStats, RelationKind, Symbol, SymbolKind
 from codeview.paths import indexes_dir, scip_cache_dir
@@ -22,7 +26,7 @@ from codeview.store import SymbolStore
 
 
 # Bump when SCIP→SQLite mapping / call-edge rules change so stale DBs rebuild.
-GRAPH_SCHEMA_VERSION = "3"
+GRAPH_SCHEMA_VERSION = "4"
 
 LAZY_KINDS = (
     RelationKind.CALLS,
@@ -420,6 +424,37 @@ class ExplorerService:
             ]
             if modules:
                 add(modules[0])
+
+        # C/C++/CUDA: ``main`` / ``WinMain`` are natural program starts.
+        native_mains: list[Symbol] = []
+        for name in ("main", "WinMain", "wWinMain"):
+            for sym in store.search(name, limit=40):
+                if sym.name != name:
+                    continue
+                if sym.kind not in {SymbolKind.FUNCTION, SymbolKind.METHOD}:
+                    continue
+                ext = Path(sym.location.path).suffix.lower()
+                if ext in {".c", ".cc", ".cpp", ".cxx", ".cu", ".h", ".hpp", ".cuh"}:
+                    native_mains.append(sym)
+        native_mains.sort(
+            key=lambda s: (
+                0 if not s.location.path.replace("\\", "/").startswith("tests/") else 1,
+                0 if not s.location.path.replace("\\", "/").startswith("benchmarks/") else 1,
+                s.location.path,
+            )
+        )
+        for sym in native_mains:
+            add(sym)
+
+        # CMake add_executable sources: attach each TU's ``main`` when present.
+        for rel in parse_cmake_executable_sources(root):
+            mains = [
+                s
+                for s in store.symbols_in_path(rel)
+                if s.name == "main" and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
+            ]
+            if mains:
+                add(mains[0])
 
         return found[:limit]
 

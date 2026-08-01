@@ -146,14 +146,27 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
             ]
             return {"results": [s.to_dict() for s in hits], "mode": "search", "truncated": len(hits) >= effective}
 
-        # Execution starts here: packaging scripts + __main__ hooks only.
+        # Execution starts here: packaging scripts + __main__ hooks + native mains.
         # Everything else is reached by expanding callers/callees (or search).
         entries = service.entry_points(limit=effective)
+        if entries:
+            return {
+                "results": [s.to_dict() for s in entries],
+                "mode": "entrypoints",
+                "entry_point_count": len(entries),
+                "truncated": False,
+            }
+        # Indexed project with no detected entry points — show top-level symbols.
+        top = [
+            s
+            for s in store.top_level(limit=effective)
+            if s.kind.value in {"class", "function", "method", "interface"}
+        ]
         return {
-            "results": [s.to_dict() for s in entries],
-            "mode": "entrypoints",
-            "entry_point_count": len(entries),
-            "truncated": False,
+            "results": [s.to_dict() for s in top],
+            "mode": "top_level" if top else "entrypoints",
+            "entry_point_count": 0,
+            "truncated": len(top) >= effective,
         }
 
     @app.get("/api/symbol/{symbol_id}")
