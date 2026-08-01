@@ -20,6 +20,9 @@ from codeview.scip_index import BackgroundIndexer, generate_scip
 from codeview.store import SymbolStore
 
 
+# Bump when SCIP→SQLite mapping / call-edge rules change so stale DBs rebuild.
+GRAPH_SCHEMA_VERSION = "3"
+
 LAZY_KINDS = (
     RelationKind.CALLS,
     RelationKind.CALLED_BY,
@@ -81,6 +84,8 @@ class ExplorerService:
         stats = store.stats()
         has_graph = int(stats.get("symbol_count") or 0) > 0 and store.get_meta("provider")
         stored_rev = store.get_meta("content_revision")
+        stored_schema = store.get_meta("graph_schema")
+        schema_ok = stored_schema == GRAPH_SCHEMA_VERSION
 
         store.set_meta("root", str(root))
         if not store.get_meta("providers"):
@@ -88,7 +93,7 @@ class ExplorerService:
             store.set_meta("provider", "scip")
             store.set_meta("index_mode", "eager")
 
-        if has_graph and stored_rev == rev:
+        if has_graph and stored_rev == rev and schema_ok:
             self.indexer._set(
                 status="ready",
                 percent=100,
@@ -157,9 +162,16 @@ class ExplorerService:
 
         progress(2, "Preparing…")
         cached = scip_cache_dir(root) / "index.scip"
-        path = scip_path or find_scip_index(root)
-        if path is None and cached.is_file() and self._cache_matches(root, rev):
+        # Prefer Codeview's cache over a leftover index.scip in the project root
+        # (scip indexers often write index.scip into cwd; a partial file there
+        # would otherwise shadow the good cache and truncate the graph).
+        path = scip_path
+        if path is None and cached.is_file() and (
+            self._cache_matches(root, rev) or cached.stat().st_size > 0
+        ):
             path = cached
+        if path is None:
+            path = find_scip_index(root)
         if path is None:
             progress(8, "Building index…")
             path = generate_scip(root, out_path=cached, on_progress=on_progress)
@@ -239,14 +251,22 @@ class ExplorerService:
         # Universal path: precise index only (generate if needed).
         if provider_name in {"auto", "", "multi", "scip"} or scip_path is not None:
             rev = content_revision or project_revision(root)
+            cached = scip_cache_dir(root) / "index.scip"
             if scip_path is None:
-                scip_path = find_scip_index(root)
-            if scip_path is None:
-                cached = scip_cache_dir(root) / "index.scip"
                 if cached.is_file() and self._cache_matches(root, rev):
                     scip_path = cached
+                else:
+                    found = find_scip_index(root)
+                    # Prefer our cache over a smaller leftover index.scip in the repo.
+                    if (
+                        found is not None
+                        and cached.is_file()
+                        and cached.stat().st_size > found.stat().st_size
+                    ):
+                        scip_path = cached
+                    else:
+                        scip_path = found
             if scip_path is None:
-                cached = scip_cache_dir(root) / "index.scip"
                 scip_path = generate_scip(root, out_path=cached, on_progress=on_progress)
                 (scip_cache_dir(root) / "revision.txt").write_text(rev, encoding="utf-8")
             provider_names = ["scip"]
@@ -295,6 +315,7 @@ class ExplorerService:
         store.set_meta("calls_indexed_langs", "*")
         store.set_meta("edges_ready", "1")
         store.set_meta("content_revision", rev)
+        store.set_meta("graph_schema", GRAPH_SCHEMA_VERSION)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         self._write_index_meta(
