@@ -4,82 +4,59 @@ from pathlib import Path
 
 from codeview.fsutil import path_is_skipped
 
-# Extension → provider name. Browse-only extensions have no provider.
-PROVIDER_EXTENSIONS: dict[str, str] = {
-    ".py": "jedi-python",
-    ".java": "treesitter-java",
-    ".scala": "treesitter-scala",
-    ".sc": "treesitter-scala",
-    ".c": "treesitter-cxx",
-    ".cc": "treesitter-cxx",
-    ".cpp": "treesitter-cxx",
-    ".cxx": "treesitter-cxx",
-    ".h": "treesitter-cxx",
-    ".hh": "treesitter-cxx",
-    ".hpp": "treesitter-cxx",
-    ".hxx": "treesitter-cxx",
-    ".cu": "treesitter-cxx",
-    ".cuh": "treesitter-cxx",
-}
-
-# Shown in directory browse even without a semantic provider.
-BROWSE_ONLY_EXTENSIONS: set[str] = {
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".html",
-    ".htm",
-    ".g4",
-    ".md",
-    ".rs",
-    ".go",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-}
-
-LANG_TO_PROVIDER: dict[str, str] = {
-    "python": "jedi-python",
-    "java": "treesitter-java",
-    "scala": "treesitter-scala",
-    "c": "treesitter-cxx",
-    "cpp": "treesitter-cxx",
-    "cuda": "treesitter-cxx",
+# Extensions used for directory browse / language labels (not heuristic parsers).
+SOURCE_EXTENSIONS: dict[str, str] = {
+    ".py": "python",
+    ".java": "java",
+    ".scala": "scala",
+    ".sc": "scala",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".c": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".h": "c",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
+    ".cu": "cuda",
+    ".cuh": "cuda",
+    ".rs": "rust",
+    ".go": "go",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".rb": "ruby",
+    ".cs": "csharp",
+    ".sh": "shell",
+    ".bash": "shell",
+    ".zsh": "shell",
+    ".html": "html",
+    ".htm": "html",
+    ".md": "text",
 }
 
 
 def language_for_extension(ext: str) -> str:
-    e = ext.lower()
-    if e == ".py":
-        return "python"
-    if e == ".java":
-        return "java"
-    if e in {".scala", ".sc"}:
-        return "scala"
-    if e in {".cu", ".cuh"}:
-        return "cuda"
-    if e == ".c":
-        return "c"
-    if e in {".h", ".hh", ".hpp", ".hxx", ".cc", ".cpp", ".cxx"}:
-        return "cpp"
-    if e == ".rs":
-        return "rust"
-    if e in {".sh", ".bash", ".zsh"}:
-        return "shell"
-    if e in {".html", ".htm"}:
-        return "html"
-    if e == ".g4":
-        return "antlr"
-    return "text"
+    return SOURCE_EXTENSIONS.get(ext.lower(), "text")
 
 
 def detect_providers(root: Path, *, sample_limit: int = 200_000) -> list[str]:
-    """Return provider names present under root, ordered by importance.
-
-    Prefer an existing SCIP index when present — Codeview should not reinvent indexing.
-    """
+    """Auto mode is SCIP-only — Codeview generates or consumes a precise index."""
+    del sample_limit  # detection lives in scip_index; auto always means scip.
     root = root.resolve()
+    if not root.is_dir():
+        return []
+    # Presence of any known source file → scip pipeline.
+    for path in root.rglob("*"):
+        if path_is_skipped(path) or not path.is_file():
+            continue
+        if path.suffix.lower() in SOURCE_EXTENSIONS:
+            return ["scip"]
+        if path.name == "index.scip":
+            return ["scip"]
     try:
         from codeview.providers.scip import find_scip_index
 
@@ -87,71 +64,21 @@ def detect_providers(root: Path, *, sample_limit: int = 200_000) -> list[str]:
             return ["scip"]
     except Exception:
         pass
-
-    found: set[str] = set()
-    count = 0
-
-    def consider(path: Path) -> None:
-        nonlocal count
-        if count >= sample_limit:
-            return
-        if path_is_skipped(path):
-            return
-        if not path.is_file():
-            return
-        provider = PROVIDER_EXTENSIONS.get(path.suffix.lower())
-        if provider:
-            found.add(provider)
-            count += 1
-
-    if (root / ".git").exists():
-        import subprocess
-
-        try:
-            proc = subprocess.run(
-                ["git", "-C", str(root), "ls-files"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            for line in proc.stdout.splitlines():
-                consider(root / line)
-                if count >= sample_limit and len(found) >= 4:
-                    break
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-    if not found:
-        for path in root.rglob("*"):
-            consider(path)
-            if count >= sample_limit and found:
-                break
-
-    priority = ["treesitter-java", "treesitter-scala", "jedi-python", "treesitter-cxx"]
-    return [name for name in priority if name in found] + sorted(found - set(priority))
+    return ["scip"]
 
 
 def all_browse_extensions(provider_names: list[str] | None = None) -> set[str]:
-    from codeview.providers import get_provider
-
-    exts = set(BROWSE_ONLY_EXTENSIONS)
-    names = provider_names or list({*PROVIDER_EXTENSIONS.values()})
-    for name in names:
-        try:
-            provider = get_provider(name)
-        except ValueError:
-            continue
-        exts |= provider.source_extensions() or {
-            ext for ext, pname in PROVIDER_EXTENSIONS.items() if pname == name
-        }
-    return exts
+    del provider_names
+    return set(SOURCE_EXTENSIONS.keys())
 
 
 def provider_name_for_path(rel_or_path: str) -> str | None:
-    suffix = Path(rel_or_path).suffix.lower()
-    return PROVIDER_EXTENSIONS.get(suffix)
+    if Path(rel_or_path).suffix.lower() in SOURCE_EXTENSIONS:
+        return "scip"
+    return None
 
 
 def provider_name_for_symbol_language(language: str) -> str | None:
-    return LANG_TO_PROVIDER.get((language or "").lower())
+    if language:
+        return "scip"
+    return None

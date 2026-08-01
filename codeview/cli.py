@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from codeview import __version__
+from codeview.paths import codeview_home, purge_codeview_data
 from codeview.providers import list_providers
 from codeview.repos import resolve_target
 from codeview.service import ExplorerService, default_db_path
@@ -14,27 +15,13 @@ from codeview.service import ExplorerService, default_db_path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codeview",
-        description="Lightweight IDE-independent source code explorer",
+        description="Local-first code explorer",
     )
     parser.add_argument("--version", action="version", version=f"codeview {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    index_p = sub.add_parser("index", help="Index a local path or public git URL into SQLite")
-    index_p.add_argument(
-        "target",
-        help="Local directory or public git URL",
-    )
-    index_p.add_argument(
-        "--provider",
-        default="auto",
-        help="Provider name, or 'auto' (SCIP if present, else language detect)",
-    )
-    index_p.add_argument(
-        "--scip",
-        type=Path,
-        default=None,
-        help="Path to an index.scip file (implies --provider scip)",
-    )
+    index_p = sub.add_parser("index", help="Build a precise index into SQLite")
+    index_p.add_argument("target", help="Local directory or public git URL")
     index_p.add_argument(
         "--db",
         type=Path,
@@ -42,15 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite database path (default: ~/.codeview/indexes/<root>.sqlite3)",
     )
 
-    serve_p = sub.add_parser(
-        "serve",
-        help="Index (optional) and start the local web UI",
-    )
+    serve_p = sub.add_parser("serve", help="Start the local web UI (indexes in the background if needed)")
     serve_p.add_argument(
         "target",
         nargs="?",
         default=None,
-        help="Local directory or public git URL to index",
+        help="Local directory or public git URL",
     )
     serve_p.add_argument(
         "--db",
@@ -66,21 +50,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Deprecated: use positional target instead",
     )
-    serve_p.add_argument("--provider", default="auto")
-    serve_p.add_argument(
-        "--scip",
-        type=Path,
-        default=None,
-        help="Path to an index.scip file (implies --provider scip)",
-    )
 
-    sub.add_parser("providers", help="List available graph providers")
+    sub.add_parser("providers", help="List graph backends")
 
-    doctor_p = sub.add_parser("doctor", help="Check / fetch runtime tools (e.g. ripgrep)")
+    doctor_p = sub.add_parser("doctor", help="Check tools or purge local Codeview data")
     doctor_p.add_argument(
         "--fetch-rg",
         action="store_true",
         help="Force download of a ripgrep binary into ~/.codeview/bin",
+    )
+    doctor_p.add_argument(
+        "--purge",
+        action="store_true",
+        help=f"Delete all Codeview data under {codeview_home()} (indexes, caches, tools)",
     )
 
     search_p = sub.add_parser("search", help="Search symbols in an index")
@@ -100,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "doctor":
+        if args.purge:
+            result = purge_codeview_data()
+            print(json.dumps(result, indent=2))
+            return 0
         from codeview.rgutil import ensure_rg
 
         try:
@@ -107,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"ripgrep: ERROR {exc}", file=sys.stderr)
             return 1
-        print(json.dumps({"rg": rg, "ok": True}, indent=2))
+        print(json.dumps({"rg": rg, "ok": True, "home": str(codeview_home())}, indent=2))
         return 0
 
     if args.command == "index":
@@ -118,13 +104,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         db = args.db or default_db_path(root)
         try:
-            stats = service.index_path(
-                root,
-                provider_name=args.provider,
-                db_path=db,
-                scip_path=args.scip,
-            )
-        except ValueError as exc:
+            stats = service.index_path(root, db_path=db)
+        except (ValueError, RuntimeError, FileNotFoundError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
         print(json.dumps(stats.to_dict(), indent=2))
@@ -146,20 +127,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(str(exc), file=sys.stderr)
                 return 1
             db = args.db or default_db_path(root)
-            try:
-                stats = service.index_path(
-                    root,
-                    provider_name=args.provider,
-                    db_path=db,
-                    scip_path=getattr(args, "scip", None),
-                )
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
-            print(json.dumps(stats.to_dict(), indent=2), file=sys.stderr)
+            # UI first — index in background when missing or stale.
+            status = service.prepare_serve(root, db_path=db)
+            print(json.dumps(status, indent=2), file=sys.stderr)
             print(f"Index: {db}", file=sys.stderr)
         elif args.db:
             service.open(args.db)
+            service.indexer._set(status="ready", percent=100, has_graph=True)
         else:
             print(
                 "Pass a local path, a git URL, or --db. Examples:\n"

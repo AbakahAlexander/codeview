@@ -25,11 +25,6 @@ def normalize_git_url(value: str) -> str:
     text = value.strip().rstrip("/")
     if text.startswith("github.com/") or text.startswith("gitlab.com/"):
         text = "https://" + text
-    if text.endswith(".git"):
-        return text
-    parsed = urlparse(text)
-    if parsed.scheme in {"http", "https"} and parsed.path:
-        return text
     return text
 
 

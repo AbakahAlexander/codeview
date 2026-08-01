@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from codeview.providers import list_providers
 from codeview.service import ExplorerService, default_db_path
 
-# Prefer the exploration frontend package; fall back to legacy server/ paths.
+
 _FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
 STATIC_DIR = _FRONTEND / "static" if (_FRONTEND / "static").is_dir() else Path(__file__).parent / "static"
 TEMPLATE_DIR = _FRONTEND / "templates" if (_FRONTEND / "templates").is_dir() else Path(__file__).parent / "templates"
@@ -63,10 +63,10 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Path does not exist: {root}")
         db = Path(body.db).expanduser() if body.db else default_db_path(root)
         try:
-            stats = service.index_path(root, provider_name=body.provider, db_path=db)
-        except ValueError as exc:
+            status = service.prepare_serve(root, db_path=db)
+        except (ValueError, FileNotFoundError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"stats": stats.to_dict(), "db": str(db)}
+        return {"status": status, "db": str(db)}
 
     @app.post("/api/open")
     def open_db(body: dict) -> dict:
@@ -80,12 +80,17 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
     def stats() -> dict:
         store = service.store
         if not store:
-            return {"has_index": False}
+            return {"has_index": False, **service.index_status()}
         data = store.stats()
         if store.get_meta("file_count") and not data.get("file_count"):
             data["file_count"] = int(store.get_meta("file_count") or 0)
         data["index_mode"] = store.get_meta("index_mode") or "eager"
+        data["index_status"] = service.index_status()
         return {"has_index": True, **data, "db": str(service.db_path)}
+
+    @app.get("/api/index-status")
+    def index_status() -> dict:
+        return service.index_status()
 
     @app.get("/api/search")
     def search(q: str, limit: int = 40) -> dict:

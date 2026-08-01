@@ -17,8 +17,11 @@ RG_VERSION = "15.2.0"
 RG_BASE = f"https://github.com/BurntSushi/ripgrep/releases/download/{RG_VERSION}"
 
 
+from codeview.paths import bin_dir
+
+
 def _cache_dir() -> Path:
-    return Path.home() / ".codeview" / "bin"
+    return bin_dir()
 
 
 def _bundled_candidate() -> Path | None:

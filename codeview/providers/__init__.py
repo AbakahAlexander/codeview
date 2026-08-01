@@ -1,20 +1,10 @@
-from codeview.providers.base import GraphProvider, EXPLORE_SECTIONS
-from codeview.providers.jedi import JediPythonProvider
-from codeview.providers.tree_sitter import (
-    TreeSitterCxxProvider,
-    TreeSitterJavaProvider,
-    TreeSitterScalaProvider,
-)
+from codeview.providers.base import GraphProvider
 from codeview.providers.scip import ScipProvider
 from codeview.providers.codegraph import CodegraphProvider
 from pathlib import Path
 
 PROVIDERS: dict[str, type[GraphProvider]] = {
     ScipProvider.name: ScipProvider,
-    JediPythonProvider.name: JediPythonProvider,
-    TreeSitterCxxProvider.name: TreeSitterCxxProvider,
-    TreeSitterJavaProvider.name: TreeSitterJavaProvider,
-    TreeSitterScalaProvider.name: TreeSitterScalaProvider,
     CodegraphProvider.name: CodegraphProvider,
 }
 

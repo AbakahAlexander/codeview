@@ -255,16 +255,68 @@ async function loadTree() {
   updateNav();
 }
 
+async function applyIndexStatus(st) {
+  if (!st) return;
+  if (st.status === "indexing") {
+    const pct = typeof st.percent === "number" ? st.percent : 0;
+    const msg = st.message || "Indexing…";
+    els.status.textContent = `${msg} ${pct}%`;
+    return "indexing";
+  }
+  if (st.status === "error") {
+    els.status.textContent = st.error || st.message || "index failed";
+    return "error";
+  }
+  return "ready";
+}
+
+async function pollIndexUntilReady() {
+  let lastReady = false;
+  for (;;) {
+    const st = await api("/api/index-status");
+    const phase = await applyIndexStatus(st);
+    if (phase === "ready") {
+      if (!lastReady) {
+        lastReady = true;
+        const stats = await api("/api/stats");
+        if (stats.has_index) {
+          els.status.textContent = `${stats.symbol_count || 0} symbols · ${stats.root || ""}`;
+          await loadTree();
+        }
+      }
+      return;
+    }
+    if (phase === "error") return;
+    // While indexing, show whatever graph already exists.
+    if (st.has_graph) {
+      await loadTree();
+    } else {
+      els.tree.innerHTML = `<li class="empty">${esc(st.message || "Indexing…")} ${st.percent || 0}%</li>`;
+    }
+    await new Promise((r) => setTimeout(r, 800));
+  }
+}
+
 async function init() {
   try {
     const stats = await api("/api/stats");
-    if (!stats.has_index) {
-      els.status.textContent = "no index";
+    const st = stats.index_status || (await api("/api/index-status"));
+    if (st && st.status === "indexing") {
+      if (stats.has_index && (stats.symbol_count || 0) > 0) {
+        els.status.textContent = `${stats.symbol_count} symbols · updating…`;
+        await loadTree();
+      }
+      await pollIndexUntilReady();
       return;
     }
-    const mode = stats.index_mode === "lazy" ? "lazy" : "full";
-    els.status.textContent = `${stats.file_count || stats.symbol_count} files · ${mode} · ${stats.root}`;
+    if (!stats.has_index && (!st || st.status !== "ready")) {
+      els.status.textContent = "no index";
+      await pollIndexUntilReady();
+      return;
+    }
+    els.status.textContent = `${stats.symbol_count || stats.file_count || 0} symbols · ${stats.root || ""}`;
     await loadTree();
+    if (st && st.status === "indexing") await pollIndexUntilReady();
   } catch (err) {
     els.status.textContent = err.message;
   }

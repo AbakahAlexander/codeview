@@ -88,9 +88,7 @@ class ScipProvider(GraphProvider):
         path = find_scip_index(root, self.index_path)
         if path is None:
             raise FileNotFoundError(
-                "No SCIP index found. Generate one with scip-java / scip-python / "
-                "scip-typescript / rust-analyzer, then place index.scip in the repo "
-                "root (or pass --scip path)."
+                "No project index is available yet. Codeview builds one automatically on serve."
             )
         self.index_path = path
         data = path.read_bytes()
@@ -231,6 +229,23 @@ class ScipProvider(GraphProvider):
                 self._relations.append(
                     Relation(
                         kind=RelationKind.REFERENCES,
+                        from_id=enclosure.id,
+                        to_id=target.id,
+                        location=loc,
+                    )
+                )
+                # Exploration UI uses callers/callees; map precise refs into those kinds.
+                self._relations.append(
+                    Relation(
+                        kind=RelationKind.CALLED_BY,
+                        from_id=target.id,
+                        to_id=enclosure.id,
+                        location=loc,
+                    )
+                )
+                self._relations.append(
+                    Relation(
+                        kind=RelationKind.CALLS,
                         from_id=enclosure.id,
                         to_id=target.id,
                         location=loc,
