@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import sys
 from pathlib import Path
 
 from codeview import __version__
-from codeview.paths import codeview_home, purge_codeview_data
+from codeview.paths import (
+    codeview_home,
+    is_ephemeral_clone,
+    purge_codeview_data,
+    purge_ephemeral_session,
+)
 from codeview.providers import list_providers
-from codeview.repos import resolve_target
+from codeview.repos import looks_like_git_url, resolve_target
 from codeview.service import ExplorerService, default_db_path
 
 
@@ -72,6 +78,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_ephemeral_cleaned: set[str] = set()
+
+
+def _cleanup_ephemeral_serve(service: ExplorerService, root: Path, db: Path) -> None:
+    """Drop peek clones + their index when the serve process exits."""
+    key = str(root.resolve())
+    if key in _ephemeral_cleaned or not is_ephemeral_clone(root):
+        return
+    _ephemeral_cleaned.add(key)
+    try:
+        if service.store is not None:
+            service.store.close()
+            service.store = None
+    except Exception:
+        pass
+    result = purge_ephemeral_session(root=root, db_path=db)
+    if result.get("purged"):
+        print(f"Purged ephemeral peek: {root}", file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -120,8 +146,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         target = args.target or (str(args.root) if args.root else None)
+        root: Path | None = None
+        db: Path | None = None
+        ephemeral = False
         if target:
             try:
+                ephemeral = looks_like_git_url(str(target))
                 root = resolve_target(target)
             except (FileNotFoundError, RuntimeError) as exc:
                 print(str(exc), file=sys.stderr)
@@ -131,6 +161,11 @@ def main(argv: list[str] | None = None) -> int:
             status = service.prepare_serve(root, db_path=db)
             print(json.dumps(status, indent=2), file=sys.stderr)
             print(f"Index: {db}", file=sys.stderr)
+            if ephemeral:
+                print(
+                    "Ephemeral peek: clone + index will be deleted when this server exits.",
+                    file=sys.stderr,
+                )
         elif args.db:
             service.open(args.db)
             service.indexer._set(status="ready", percent=100, has_graph=True)
@@ -149,7 +184,13 @@ def main(argv: list[str] | None = None) -> int:
 
         app = create_app(service)
         print(f"Codeview UI: http://{args.host}:{args.port}", file=sys.stderr)
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        if root is not None and db is not None and ephemeral:
+            atexit.register(_cleanup_ephemeral_serve, service, root, db)
+        try:
+            uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        finally:
+            if root is not None and db is not None and ephemeral:
+                _cleanup_ephemeral_serve(service, root, db)
         return 0
 
     parser.error(f"Unknown command: {args.command}")

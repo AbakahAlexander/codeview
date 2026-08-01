@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import urlparse
+
+from codeview.paths import repos_dir
 
 _GIT_URL_RE = re.compile(
     r"^(?:https?://|git@|ssh://|git://)",
@@ -31,7 +33,7 @@ def normalize_git_url(value: str) -> str:
 def repo_cache_dir(url: str) -> Path:
     safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", url.strip())[:120]
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
-    return Path.home() / ".codeview" / "repos" / f"{safe}-{digest}"
+    return repos_dir() / f"{safe}-{digest}"
 
 
 def resolve_target(target: str | Path) -> Path:
@@ -51,8 +53,6 @@ def resolve_target(target: str | Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             # Incomplete previous clone
-            import shutil
-
             shutil.rmtree(dest)
         print(f"Cloning {url} → {dest}", flush=True)
         proc = subprocess.run(
