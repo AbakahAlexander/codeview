@@ -290,8 +290,8 @@ def _run(
             if m:
                 reported = min(99, int(m.group(1)))
                 pct = progress_start + int(span * (reported / 100.0))
-            label = last_line or progress_label
-            on_progress(min(progress_end, pct), f"{label} · {int(elapsed)}s")
+            # UI shows percent only; keep message generic (no Gradle/tool spam).
+            on_progress(min(progress_end, pct), progress_label)
 
     t_read = threading.Thread(target=reader, name="codeview-index-out", daemon=True)
     t_beat = threading.Thread(target=heartbeat, name="codeview-index-beat", daemon=True)

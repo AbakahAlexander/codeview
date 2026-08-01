@@ -147,7 +147,9 @@ async function selectSymbol(symbol, record = true) {
       callerSnippet.highlight_line
     );
     const peerSnippet = callerVisible ? calleeSnippet : callerSnippet;
-    const peerLabel = callerVisible ? "callee" : "caller";
+    // Prefer plain "definition" — "callee/caller" is confusing when browsing
+    // a callers list (the related pane is usually the method you started from).
+    const peerLabel = callerVisible ? "definition" : "caller definition";
     const peerFocus = peerSnippet.highlight_line;
     els.srcMeta.textContent = `${callSnippet.path}:${callFocus} ↔ ${peerSnippet.path}:${peerFocus}`;
     els.srcCallBlock.hidden = false;
@@ -363,8 +365,7 @@ async function applyIndexStatus(st) {
   if (!st) return;
   if (st.status === "indexing") {
     const pct = typeof st.percent === "number" ? st.percent : 0;
-    const msg = st.message || "Indexing…";
-    els.status.textContent = `${msg} ${pct}%`;
+    els.status.textContent = `${pct}%`;
     return "indexing";
   }
   if (st.status === "error") {
@@ -399,7 +400,7 @@ async function pollIndexUntilReady() {
     if (st.has_graph) {
       await loadTree();
     } else {
-      els.tree.innerHTML = `<li class="empty">${esc(st.message || "Indexing…")} ${st.percent || 0}%</li>`;
+      els.tree.innerHTML = `<li class="empty">${st.percent || 0}%</li>`;
     }
     await new Promise((r) => setTimeout(r, 350));
   }
