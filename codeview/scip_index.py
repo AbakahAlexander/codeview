@@ -417,6 +417,10 @@ def _index_jvm(root: Path, out: Path, progress: ProgressCb) -> Path:
     # Large multi-module Gradle repos (Iceberg, Spark connectors, …) often fail
     # configuring optional Spark/Flink matrices or test compilation under the
     # SemanticDB plugin. Prefer main sources with empty version matrices.
+    #
+    # Important: args after ``--`` *replace* scip-java's default Gradle tasks, so
+    # we must re-state ``clean scipPrintDependencies scipCompileAll`` or the
+    # build exits 0 after ``help`` and never writes index.scip.
     if (root / "gradlew").is_file() or (root / "build.gradle").is_file() or (
         root / "build.gradle.kts"
     ).is_file():
@@ -430,6 +434,9 @@ def _index_jvm(root: Path, out: Path, progress: ProgressCb) -> Path:
                 "compileTestJava",
                 "-x",
                 "test",
+                "clean",
+                "scipPrintDependencies",
+                "scipCompileAll",
             ]
         )
     try:
@@ -456,9 +463,16 @@ def _index_jvm(root: Path, out: Path, progress: ProgressCb) -> Path:
             progress_end=90,
             progress_label="Indexing JVM sources…",
         )
-    if out.is_file():
+    if out.is_file() and out.stat().st_size > 0:
         return out
-    return _move_scip_output(root, out)
+    # scip-java sometimes writes cwd/index.scip even when --output is set.
+    moved = _move_scip_output(root, out)
+    if moved.is_file() and moved.stat().st_size > 0:
+        return moved
+    raise RuntimeError(
+        "JVM indexer finished but produced an empty index. "
+        "The project may need a JDK 17+ and a working Gradle/Maven build."
+    )
 
 
 SCIP_JAVA_VERSION = "v0.12.3"
