@@ -371,11 +371,13 @@ class BackgroundIndexer:
             self.state.updated_at = time.time()
 
     def start(self, fn) -> bool:
-        """Start ``fn`` in a daemon thread if idle/ready/error. Returns False if already running."""
+        """Start ``fn`` in a daemon thread if none is running. Returns False if busy."""
         with self._lock:
-            if self.state.status == "indexing":
+            if self._thread is not None and self._thread.is_alive():
                 return False
-            self.state = IndexJobState(status="indexing", percent=0, message="Starting…")
+            # Caller may already have set status/message; keep them if present.
+            if self.state.status != "indexing":
+                self.state = IndexJobState(status="indexing", percent=0, message="Starting…")
         self._thread = threading.Thread(target=fn, name="codeview-index", daemon=True)
         self._thread.start()
         return True
