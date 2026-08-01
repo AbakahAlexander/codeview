@@ -77,6 +77,9 @@ function pushHistory(symbol) {
     path: symbol.location.path,
     line: symbol.location.line,
     call_site: !!symbol.call_site,
+    edge: symbol.edge || null,
+    peer_id: symbol.peer_id || null,
+    peer_name: symbol.peer_name || null,
     def_location: symbol.def_location || null,
   };
   state.history = state.history.slice(0, state.historyIndex + 1);
@@ -86,7 +89,8 @@ function pushHistory(symbol) {
     cur.id === step.id &&
     cur.line === step.line &&
     cur.path === step.path &&
-    cur.call_site === step.call_site
+    cur.call_site === step.call_site &&
+    cur.peer_id === step.peer_id
   ) {
     updateNav();
     return;
@@ -94,6 +98,15 @@ function pushHistory(symbol) {
   state.history.push(step);
   state.historyIndex = state.history.length - 1;
   updateNav();
+}
+
+function snippetContains(snippet, path, line) {
+  if (!snippet || !path || !line) return false;
+  return (
+    snippet.path === path &&
+    line >= snippet.start_line &&
+    line <= snippet.end_line
+  );
 }
 
 async function selectSymbol(symbol, record = true) {
@@ -109,24 +122,39 @@ async function selectSymbol(symbol, record = true) {
     return;
   }
 
-  // Call edges: show both the call site and the related symbol's definition.
-  if (symbol.call_site && symbol.location && symbol.location.line) {
+  // Call edges: show the call site plus the other related definition so you
+  // can see how the two sides interact (e.g. build_parser header + the call).
+  if (symbol.call_site && symbol.location && symbol.location.line && symbol.peer_id) {
     const callQs = new URLSearchParams({
       line: String(symbol.location.line),
       path: symbol.location.path || "",
     });
-    const [callSnippet, defSnippet] = await Promise.all([
+    // For callees of P: caller=P, callee=row. For callers of P: caller=row, callee=P.
+    const callerId = symbol.edge === "called_by" ? symbol.id : symbol.peer_id;
+    const calleeId = symbol.edge === "called_by" ? symbol.peer_id : symbol.id;
+    const [callSnippet, callerSnippet, calleeSnippet] = await Promise.all([
       api(`/api/source/${symbol.id}?${callQs.toString()}`),
-      api(`/api/source/${symbol.id}`),
+      api(`/api/source/${callerId}`),
+      api(`/api/source/${calleeId}`),
     ]);
     const callFocus = callSnippet.highlight_line || symbol.location.line;
-    const defFocus = defSnippet.highlight_line || (symbol.def_location && symbol.def_location.line);
-    els.srcMeta.textContent = `${callSnippet.path}:${callFocus} → ${defSnippet.path}:${defFocus}`;
+    // If the caller's def is already in the call-site window (e.g. main right
+    // above parser = build_parser()), show the callee. Otherwise show the
+    // caller so a far-away def like build_parser at :15 pairs with a call at :65.
+    const callerVisible = snippetContains(
+      callSnippet,
+      callerSnippet.path,
+      callerSnippet.highlight_line
+    );
+    const peerSnippet = callerVisible ? calleeSnippet : callerSnippet;
+    const peerLabel = callerVisible ? "callee" : "caller";
+    const peerFocus = peerSnippet.highlight_line;
+    els.srcMeta.textContent = `${callSnippet.path}:${callFocus} ↔ ${peerSnippet.path}:${peerFocus}`;
     els.srcCallBlock.hidden = false;
     els.srcCallLabel.textContent = `call site · ${callSnippet.path}:${callFocus}`;
-    els.srcDefLabel.textContent = `definition · ${defSnippet.path}:${defFocus}`;
+    els.srcDefLabel.textContent = `${peerLabel} · ${peerSnippet.path}:${peerFocus}`;
     renderSnippet(els.srcCall, callSnippet);
-    renderSnippet(els.srcDef, defSnippet);
+    renderSnippet(els.srcDef, peerSnippet);
     return;
   }
 
@@ -247,6 +275,9 @@ async function loadBranches(symbol, container, ancestors = []) {
           ? {
               ...s,
               call_site: true,
+              edge: branch.kind,
+              peer_id: symbol.id,
+              peer_name: symbol.name,
               def_location: s.location,
               location: {
                 ...s.location,
@@ -405,6 +436,9 @@ async function init() {
       ? {
           ...data.symbol,
           call_site: true,
+          edge: step.edge,
+          peer_id: step.peer_id,
+          peer_name: step.peer_name,
           def_location: step.def_location || data.symbol.location,
           location: {
             ...data.symbol.location,
