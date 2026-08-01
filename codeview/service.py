@@ -393,7 +393,26 @@ class ExplorerService:
             add((prefer or loose or [None])[0])
 
         for rel in find_dunder_main_files(root):
-            # Prefer the file module symbol; also surface a main() in that file if present.
+            # Package ``__main__.py``: keep the file module as a start node.
+            if Path(rel).name == "__main__.py":
+                modules = [
+                    s
+                    for s in store.symbols_in_path(rel)
+                    if s.kind == SymbolKind.MODULE and s.signature == "file"
+                ]
+                if modules:
+                    add(modules[0])
+                continue
+            # Other files with a main-guard: prefer ``main()`` in that file, and
+            # skip the file module when packaging scripts already listed it.
+            mains = [
+                s
+                for s in store.symbols_in_path(rel)
+                if s.name == "main" and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
+            ]
+            if mains:
+                add(mains[0])
+                continue
             modules = [
                 s
                 for s in store.symbols_in_path(rel)
@@ -401,13 +420,6 @@ class ExplorerService:
             ]
             if modules:
                 add(modules[0])
-            mains = [
-                s
-                for s in store.symbols_in_path(rel)
-                if s.name == "main" and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
-            ]
-            for sym in mains:
-                add(sym)
 
         return found[:limit]
 

@@ -145,18 +145,14 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
             ]
             return {"results": [s.to_dict() for s in hits], "mode": "search", "truncated": len(hits) >= effective}
 
-        # Entry points first (console_scripts / __main__), then other top-level symbols.
-        entries = service.entry_points(limit=40)
-        entry_ids = {s.id for s in entries}
-        rest = [s for s in store.top_level(query=None, limit=effective) if s.id not in entry_ids]
-        # Cap total results; keep all entry points when possible.
-        room = max(0, effective - len(entries))
-        results = entries + rest[:room]
+        # Execution starts here: packaging scripts + __main__ hooks only.
+        # Everything else is reached by expanding callers/callees (or search).
+        entries = service.entry_points(limit=effective)
         return {
-            "results": [s.to_dict() for s in results],
-            "mode": "symbols",
+            "results": [s.to_dict() for s in entries],
+            "mode": "entrypoints",
             "entry_point_count": len(entries),
-            "truncated": len(rest) > room,
+            "truncated": False,
         }
 
     @app.get("/api/symbol/{symbol_id}")

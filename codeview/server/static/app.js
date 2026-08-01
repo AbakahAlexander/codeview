@@ -270,21 +270,12 @@ async function loadTree() {
     return;
   }
   const entryCount = data.entry_point_count || 0;
-  if (!q && entryCount > 0) {
+  if (!q && (data.mode === "entrypoints" || entryCount > 0)) {
     const header = document.createElement("li");
-    header.innerHTML = `<div class="group">entry points (${entryCount})</div>`;
+    header.innerHTML = `<div class="group">entry points</div>`;
     els.tree.appendChild(header);
-    data.results.slice(0, entryCount).forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
-    const rest = data.results.slice(entryCount);
-    if (rest.length) {
-      const other = document.createElement("li");
-      other.innerHTML = `<div class="group">symbols</div>`;
-      els.tree.appendChild(other);
-      rest.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
-    }
-  } else {
-    data.results.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
   }
+  data.results.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
   updateNav();
 }
 
