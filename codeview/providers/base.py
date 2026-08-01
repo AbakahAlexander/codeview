@@ -1,7 +1,7 @@
 """Exploration providers — Codeview owns the experience, not the indexer.
 
-Each provider adapts an existing indexing technology (SCIP, Tree-sitter, Jedi,
-Codegraph, …) into a common exploration API used by the local UI.
+Each provider adapts an existing indexing technology (SCIP, Tree-sitter, Jedi, …)
+into a common exploration API used by the local UI.
 """
 
 from __future__ import annotations

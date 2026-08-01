@@ -1,11 +1,10 @@
+from pathlib import Path
+
 from codeview.providers.base import GraphProvider
 from codeview.providers.scip import ScipProvider
-from codeview.providers.codegraph import CodegraphProvider
-from pathlib import Path
 
 PROVIDERS: dict[str, type[GraphProvider]] = {
     ScipProvider.name: ScipProvider,
-    CodegraphProvider.name: CodegraphProvider,
 }
 
 
