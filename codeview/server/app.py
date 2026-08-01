@@ -17,6 +17,22 @@ STATIC_DIR = _FRONTEND / "static"
 TEMPLATE_DIR = _FRONTEND / "templates"
 
 
+def _looks_generated_path(path: str) -> bool:
+    """Skip OpenAPI dumps / build outputs when listing fallback top-level symbols."""
+    p = path.replace("\\", "/").lstrip("./").lower()
+    needles = (
+        "open-api/",
+        "openapi/",
+        "generated/",
+        "/build/",
+        "/target/",
+        "/out/",
+        ".codeview-build/",
+        "node_modules/",
+    )
+    return any(n in f"/{p}" or p.startswith(n.lstrip("/")) for n in needles)
+
+
 class IndexRequest(BaseModel):
     path: str
     provider: str = "auto"
@@ -156,12 +172,14 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
                 "entry_point_count": len(entries),
                 "truncated": False,
             }
-        # Indexed project with no detected entry points — show top-level symbols.
+        # Indexed project with no detected entry points — show top-level symbols
+        # from real source trees (skip generated OpenAPI / docs dumps).
         top = [
             s
-            for s in store.top_level(limit=effective)
+            for s in store.top_level(limit=effective * 3)
             if s.kind.value in {"class", "function", "method", "interface"}
-        ]
+            and not _looks_generated_path(s.location.path)
+        ][:effective]
         return {
             "results": [s.to_dict() for s in top],
             "mode": "top_level" if top else "entrypoints",

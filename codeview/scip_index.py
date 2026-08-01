@@ -67,21 +67,29 @@ _EXT_LANG: dict[str, str] = {
 
 
 def detect_index_languages(root: Path, *, sample_limit: int = 50_000) -> list[str]:
-    """Return language keys present under root, most important first."""
+    """Return language keys present under root, dominant language first.
+
+    Mixed repos (e.g. Apache Iceberg: thousands of ``.java`` + a couple of
+    generated ``.py`` files) must not pick Python just because it appears first
+    in a fixed priority list.
+    """
+    from collections import Counter
+
     root = root.resolve()
-    found: set[str] = set()
-    count = 0
+    counts: Counter[str] = Counter()
+    scanned = 0
 
     def consider(path: Path) -> None:
-        nonlocal count
-        if count >= sample_limit or path_is_skipped(path):
+        nonlocal scanned
+        if scanned >= sample_limit or path_is_skipped(path):
             return
         if not path.is_file():
             return
         lang = _EXT_LANG.get(path.suffix.lower())
-        if lang:
-            found.add(lang)
-            count += 1
+        if not lang:
+            return
+        counts[lang] += 1
+        scanned += 1
 
     if (root / ".git").exists():
         try:
@@ -94,40 +102,50 @@ def detect_index_languages(root: Path, *, sample_limit: int = 50_000) -> list[st
             )
             for line in proc.stdout.splitlines():
                 consider(root / line)
-                if len(found) >= 8 and count >= 200:
+                if scanned >= sample_limit:
                     break
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-    if not found:
+    if not counts:
         for path in root.rglob("*"):
             consider(path)
-            if len(found) >= 8 and count >= 500:
+            if scanned >= sample_limit:
                 break
 
-    # Prefer one primary indexer when mixed; order matters.
-    priority = [
-        "python",
-        "typescript",
-        "javascript",
-        "java",
-        "kotlin",
-        "scala",
-        "go",
-        "rust",
-        "csharp",
-        "ruby",
-        "cpp",
-        "c",
-        "cuda",
-    ]
+    if not counts:
+        return []
+
     # Collapse JS into typescript indexer.
-    if "javascript" in found:
-        found.discard("javascript")
-        found.add("typescript")
-    if "cuda" in found:
-        found.add("cpp")
-    return [name for name in priority if name in found]
+    if counts.get("javascript"):
+        counts["typescript"] += counts.pop("javascript")
+    if counts.get("cuda"):
+        counts["cpp"] += counts["cuda"]
+
+    # Build-system hints: bump the primary stack when manifests are obvious.
+    if (root / "build.gradle").is_file() or (root / "build.gradle.kts").is_file() or (
+        root / "pom.xml"
+    ).is_file():
+        for lang in ("java", "kotlin", "scala"):
+            if counts.get(lang):
+                counts[lang] += 10_000
+                break
+    if (root / "pyproject.toml").is_file() or (root / "setup.py").is_file():
+        if counts.get("python"):
+            counts["python"] += 10_000
+    if (root / "go.mod").is_file() and counts.get("go"):
+        counts["go"] += 10_000
+    if (root / "Cargo.toml").is_file() and counts.get("rust"):
+        counts["rust"] += 10_000
+    if (root / "package.json").is_file() and counts.get("typescript"):
+        counts["typescript"] += 10_000
+
+    # Dominant language first; ignore tiny companions (<2% of the leader)
+    # so a couple of generated scripts don't steal the index.
+    ordered = [lang for lang, _n in counts.most_common()]
+    leader = counts[ordered[0]]
+    significant = [lang for lang in ordered if counts[lang] * 50 >= leader or lang == ordered[0]]
+    return significant
 
 
 def generate_scip(
@@ -153,7 +171,7 @@ def generate_scip(
             "Supported: Python, JS/TS, Go, Java/Kotlin/Scala, Rust, Ruby, C/C++, C#."
         )
 
-    # Try each language until one indexer succeeds.
+    # Try each language until one indexer succeeds (dominant language first).
     errors: list[str] = []
     for i, lang in enumerate(languages):
         base = 10 + int(70 * i / max(1, len(languages)))
@@ -290,17 +308,48 @@ def _index_go(root: Path, out: Path, progress: ProgressCb) -> Path:
 
 
 def _index_jvm(root: Path, out: Path, progress: ProgressCb) -> Path:
-    exe = _which("scip-java")
-    if not exe:
-        # Common local install location we may populate later.
-        candidate = bin_dir() / "scip-java"
-        if candidate.is_file():
-            exe = str(candidate)
-        else:
-            raise RuntimeError("scip-java not found on PATH")
+    progress(15, "Preparing JVM indexer…")
+    exe = _ensure_scip_java()
     progress(30, "Indexing JVM sources…")
-    _run([exe, "index"], cwd=root, timeout=3600)
+    _run([exe, "index"], cwd=root, timeout=7200)
     return _move_scip_output(root, out)
+
+
+SCIP_JAVA_VERSION = "v0.12.3"
+
+
+def _ensure_scip_java() -> str:
+    """Locate scip-java on PATH or download a release binary into ~/.codeview/bin."""
+    exe = _which("scip-java")
+    if exe:
+        return exe
+    dest = bin_dir() / "scip-java"
+    if dest.is_file() and os.access(dest, os.X_OK):
+        return str(dest)
+
+    import urllib.request
+
+    # Needs a JDK to run; fail early with a clear message.
+    if not _which("java"):
+        raise RuntimeError(
+            "scip-java requires a JDK (java) on PATH. Install JDK 17+ and retry."
+        )
+
+    url = (
+        f"https://github.com/scip-code/scip-java/releases/download/"
+        f"{SCIP_JAVA_VERSION}/scip-java-{SCIP_JAVA_VERSION}"
+    )
+    bin_dir().mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".download")
+    try:
+        urllib.request.urlretrieve(url, tmp)
+        tmp.chmod(0o755)
+        tmp.replace(dest)
+    except Exception as exc:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to download scip-java: {exc}") from exc
+    return str(dest)
 
 
 def _index_rust(root: Path, out: Path, progress: ProgressCb) -> Path:

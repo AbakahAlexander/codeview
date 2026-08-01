@@ -26,7 +26,7 @@ from codeview.store import SymbolStore
 
 
 # Bump when SCIP→SQLite mapping / call-edge rules change so stale DBs rebuild.
-GRAPH_SCHEMA_VERSION = "4"
+GRAPH_SCHEMA_VERSION = "5"
 
 LAZY_KINDS = (
     RelationKind.CALLS,
