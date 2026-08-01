@@ -144,9 +144,13 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
                 if s.kind.value in {"class", "function", "method", "interface"}
             ]
             return {"results": [s.to_dict() for s in hits], "mode": "search", "truncated": len(hits) >= effective}
-        # File-first tree: show indexed source files, expand into symbols.
-        files = store.file_modules(limit=effective)
-        return {"results": [s.to_dict() for s in files], "mode": "files", "truncated": len(files) >= effective}
+        # Symbol-first: classes/functions (path already shown on each row).
+        symbols = store.top_level(query=None, limit=effective)
+        return {
+            "results": [s.to_dict() for s in symbols],
+            "mode": "symbols",
+            "truncated": len(symbols) >= effective,
+        }
 
     @app.get("/api/symbol/{symbol_id}")
     def get_symbol(symbol_id: str) -> dict:
