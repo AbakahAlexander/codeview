@@ -16,6 +16,15 @@ pipx install 'git+https://github.com/AbakahAlexander/codeview.git'
 
 Requires Python 3.10+, `git`, and a language toolchain for indexing (Node for JS/TS, JDK for Java, … — see docs). Private git URLs work via your local git credentials.
 
+On Windows, C/C++ indexing needs Docker Desktop (running). Install and start it with:
+
+```bash
+winget install -e --id Docker.DockerDesktop
+docker desktop start
+```
+
+Other languages on Windows do not need Docker.
+
 ## Use
 
 Always purge before reinstalling so you never hit a stale local index:

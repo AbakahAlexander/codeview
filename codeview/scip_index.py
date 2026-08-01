@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -228,10 +229,14 @@ def _run(
     merged = os.environ.copy()
     if env:
         merged.update(env)
+    # Windows npm shims are ``*.cmd``; list-form CreateProcess needs ``cmd /c``.
+    argv = cmd
+    if os.name == "nt" and cmd and cmd[0].lower().endswith((".cmd", ".bat")):
+        argv = ["cmd", "/c", *cmd]
 
     if on_progress is None:
         proc = subprocess.run(
-            cmd,
+            argv,
             cwd=str(cwd),
             env=merged,
             capture_output=True,
@@ -248,7 +253,7 @@ def _run(
     import threading
 
     proc = subprocess.Popen(
-        cmd,
+        argv,
         cwd=str(cwd),
         env=merged,
         stdout=subprocess.PIPE,
@@ -321,20 +326,36 @@ def _npm() -> str:
 
 
 def _ensure_npm_package(package: str, binary: str) -> Path:
-    """Install an npm package under ~/.codeview/tools and return the binary path."""
+    """Install an npm package under ~/.codeview/tools and return the binary path.
+
+    On Windows, return the ``.cmd`` shim — the bare Unix script causes WinError 193.
+    """
     tool_root = tools_dir() / "npm" / package.replace("/", "__").replace("@", "")
-    bin_path = tool_root / "node_modules" / ".bin" / binary
-    if bin_path.is_file():
-        return bin_path
-    tool_root.mkdir(parents=True, exist_ok=True)
-    _run([_npm(), "install", "--no-fund", "--no-audit", package], cwd=tool_root, timeout=600)
-    if not bin_path.is_file():
-        # Some packages put the bin only on PATH after install; try npx-style path.
+    bindir = tool_root / "node_modules" / ".bin"
+
+    def pick() -> Path | None:
+        if os.name == "nt":
+            cmd = bindir / f"{binary}.cmd"
+            if cmd.is_file():
+                return cmd
+        else:
+            unix = bindir / binary
+            if unix.is_file():
+                return unix
         alt = tool_root / "node_modules" / package / "bin" / binary
         if alt.is_file():
             return alt
-        raise RuntimeError(f"Installed {package} but could not find binary {binary}")
-    return bin_path
+        return None
+
+    found = pick()
+    if found:
+        return found
+    tool_root.mkdir(parents=True, exist_ok=True)
+    _run([_npm(), "install", "--no-fund", "--no-audit", package], cwd=tool_root, timeout=600)
+    found = pick()
+    if found:
+        return found
+    raise RuntimeError(f"Installed {package} but could not find binary {binary}")
 
 
 def _move_scip_output(root: Path, out: Path) -> Path:
@@ -357,8 +378,7 @@ def _index_python(root: Path, out: Path, progress: ProgressCb) -> Path:
     progress(15, "Preparing Python indexer…")
     exe = _which("scip-python")
     if not exe:
-        bin_path = _ensure_npm_package("@sourcegraph/scip-python", "scip-python")
-        exe = str(bin_path)
+        exe = str(_ensure_npm_package("@sourcegraph/scip-python", "scip-python"))
     progress(30, "Indexing Python…")
     name = root.name or "project"
     _run(
@@ -377,8 +397,7 @@ def _index_typescript(root: Path, out: Path, progress: ProgressCb) -> Path:
     progress(15, "Preparing JS/TS indexer…")
     exe = _which("scip-typescript")
     if not exe:
-        bin_path = _ensure_npm_package("@sourcegraph/scip-typescript", "scip-typescript")
-        exe = str(bin_path)
+        exe = str(_ensure_npm_package("@sourcegraph/scip-typescript", "scip-typescript"))
     progress(30, "Indexing JavaScript/TypeScript…")
     _run(
         [exe, "index"],
@@ -544,6 +563,8 @@ def _index_ruby(root: Path, out: Path, progress: ProgressCb) -> Path:
 
 
 SCIP_CLANG_VERSION = "v0.4.0"
+SCIP_CLANG_DOCKER_IMAGE = f"codeview-scip-clang:{SCIP_CLANG_VERSION}"
+_SCIP_CLANG_DOCKERFILE = Path(__file__).resolve().parent / "docker" / "scip-clang.Dockerfile"
 
 
 def _ensure_scip_clang() -> str:
@@ -568,8 +589,9 @@ def _ensure_scip_clang() -> str:
         asset = "scip-clang-x86_64-darwin"
     else:
         raise RuntimeError(
-            "scip-clang is not available for this platform; install it manually from "
-            "https://github.com/sourcegraph/scip-clang/releases"
+            "scip-clang has no native binary for this platform. "
+            "On Windows, Codeview indexes C/C++ through Docker automatically — "
+            "install Docker Desktop and retry."
         )
 
     url = (
@@ -587,6 +609,139 @@ def _ensure_scip_clang() -> str:
             tmp.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to download scip-clang: {exc}") from exc
     return str(dest)
+
+
+def _docker() -> str:
+    docker = _which("docker")
+    if not docker:
+        raise RuntimeError(
+            "C/C++ indexing on Windows requires Docker. Install Docker Desktop, "
+            "start it, then retry. We're working on removing this requirement."
+        )
+    return docker
+
+
+def _ensure_scip_clang_docker_image(progress: ProgressCb) -> str:
+    """Build a local Linux image with scip-clang + g++/cmake (cached after first run)."""
+    docker = _docker()
+    probe = subprocess.run(
+        [docker, "image", "inspect", SCIP_CLANG_DOCKER_IMAGE],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode == 0:
+        return SCIP_CLANG_DOCKER_IMAGE
+    if not _SCIP_CLANG_DOCKERFILE.is_file():
+        raise RuntimeError(f"Missing Dockerfile: {_SCIP_CLANG_DOCKERFILE}")
+    progress(16, "Building Linux C/C++ indexer image (first run only)…")
+    proc = subprocess.run(
+        [
+            docker,
+            "build",
+            "--platform=linux/amd64",
+            "--build-arg",
+            f"SCIP_CLANG_VERSION={SCIP_CLANG_VERSION}",
+            "-t",
+            SCIP_CLANG_DOCKER_IMAGE,
+            "-f",
+            str(_SCIP_CLANG_DOCKERFILE),
+            str(_SCIP_CLANG_DOCKERFILE.parent),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()[:2000]
+        raise RuntimeError(f"Failed to build C/C++ Docker image:\n{err}")
+    return SCIP_CLANG_DOCKER_IMAGE
+
+
+def _index_clang_docker(root: Path, out: Path, progress: ProgressCb) -> Path:
+    """Run Linux scip-clang inside Docker (Windows hosts)."""
+    docker = _docker()
+    image = _ensure_scip_clang_docker_image(progress)
+    progress(20, "Indexing C/C++ in Docker…")
+    # Write into the mounted tree, then move to the host cache path.
+    staged = root / ".codeview-index.scip"
+    if staged.is_file():
+        staged.unlink()
+    # Generate/refresh a Linux-path compile DB inside the container, then index.
+    script = r"""
+set -euo pipefail
+cd /work
+COMPDB=""
+for c in compile_commands.json build/compile_commands.json .codeview-compile_commands.json; do
+  if [ -f "$c" ]; then COMPDB="$c"; break; fi
+done
+if [ -z "$COMPDB" ] && [ -f CMakeLists.txt ]; then
+  mkdir -p .codeview-build
+  if cmake -B .codeview-build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON . ; then
+    COMPDB=.codeview-build/compile_commands.json
+  fi
+fi
+if [ -z "$COMPDB" ] || [ ! -f "$COMPDB" ]; then
+  python3 - <<'PY'
+import json, os
+from pathlib import Path
+root = Path("/work")
+cxx = {".c", ".cc", ".cpp", ".cxx", ".cu"}
+skip = {".codeview-build", "CMakeFiles", "build", ".git"}
+entries = []
+incs = []
+for name in ("include", "src", "lib", "third_party"):
+    if (root / name).is_dir():
+        incs.extend(["-I", str(root / name)])
+for path in sorted(root.rglob("*")):
+    if path.suffix.lower() not in cxx or not path.is_file():
+        continue
+    if any(p in skip for p in path.parts):
+        continue
+    rel = path.relative_to(root).as_posix()
+    entries.append({
+        "directory": "/work",
+        "file": rel,
+        "arguments": ["g++", "-std=c++17", "-c", rel, *incs],
+    })
+if not entries:
+    raise SystemExit("No C/C++ source files found to index")
+Path("/work/.codeview-compile_commands.json").write_text(json.dumps(entries, indent=2))
+print(".codeview-compile_commands.json")
+PY
+  COMPDB=.codeview-compile_commands.json
+fi
+scip-clang --compdb-path="$COMPDB" --index-output-path=/work/.codeview-index.scip
+"""
+    proc = subprocess.run(
+        [
+            docker,
+            "run",
+            "--rm",
+            "--platform=linux/amd64",
+            "-v",
+            f"{root.resolve()}:/work",
+            "-w",
+            "/work",
+            image,
+            "bash",
+            "-lc",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        check=False,
+    )
+    if proc.returncode != 0 or not staged.is_file() or staged.stat().st_size == 0:
+        err = (proc.stderr or proc.stdout or "").strip()[:2000]
+        raise RuntimeError(err or "Docker scip-clang indexing failed")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        out.unlink()
+    shutil.move(str(staged), str(out))
+    progress(90, "C/C++ index ready")
+    return out
 
 
 def _find_compdb(root: Path) -> Path | None:
@@ -633,8 +788,6 @@ def _try_cmake_compdb(root: Path, progress: ProgressCb) -> Path | None:
 
 def _synthesize_compdb(root: Path) -> Path:
     """Best-effort compile_commands.json from source files (no full build required)."""
-    import json
-
     compiler = _which("clang++") or _which("g++") or _which("c++")
     if not compiler:
         raise RuntimeError(
@@ -676,6 +829,9 @@ def _synthesize_compdb(root: Path) -> Path:
 
 def _index_clang(root: Path, out: Path, progress: ProgressCb) -> Path:
     progress(15, "Preparing C/C++ indexer…")
+    # Native scip-clang is Linux/macOS only — Windows uses the same Linux binary in Docker.
+    if os.name == "nt":
+        return _index_clang_docker(root, out, progress)
     exe = _ensure_scip_clang()
     progress(20, "Resolving compilation database…")
     compdb = _find_compdb(root)

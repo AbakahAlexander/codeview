@@ -14,7 +14,7 @@ Indexed via SCIP when detection finds sources (dominant language first):
 |----------|--------|
 | Python | Strong; scripts / `__main__` entry points |
 | Java / Kotlin / Scala | Gradle/Maven + SemanticDB; `scip-java` fetched if needed |
-| C / C++ / CUDA | Needs `compile_commands.json` (or CMake synth); `scip-clang` fetched if needed |
+| C / C++ / CUDA | Needs `compile_commands.json` (or CMake synth); `scip-clang` fetched on Linux/macOS. **Windows:** Docker Desktop required (`winget install -e --id Docker.DockerDesktop`) — same Linux indexer runs in a local container (first run builds image `codeview-scip-clang`). |
 | JS / TS | `scip-typescript` via npm when sources/`package.json` dominate |
 | Go, Rust, Ruby, C# | Supported when project layout matches the indexer |
 

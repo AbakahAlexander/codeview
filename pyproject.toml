@@ -29,7 +29,12 @@ where = ["."]
 include = ["codeview*"]
 
 [tool.setuptools.package-data]
-codeview = ["frontend/static/*", "frontend/templates/*", "providers/scip/*.py"]
+codeview = [
+  "frontend/static/*",
+  "frontend/templates/*",
+  "providers/scip/*.py",
+  "docker/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
