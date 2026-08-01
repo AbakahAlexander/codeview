@@ -71,10 +71,29 @@ body {
   margin: 2px 0;
 }
 .empty { color: #888; padding: 4px 0; }
-pre#src {
+.src-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.src-block {
+  border: 1px solid #ddd;
+  background: #fafafa;
+}
+.src-label {
+  padding: 4px 8px;
+  border-bottom: 1px solid #ddd;
+  color: #555;
+  font-size: 12px;
+  background: #f0f0f0;
+}
+pre.src {
   margin: 0;
+  padding: 6px 8px;
   white-space: pre;
   overflow: auto;
+  max-height: 42vh;
+  background: #fff;
 }
 .line { display: block; }
 .line .ln {

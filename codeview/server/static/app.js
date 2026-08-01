@@ -16,12 +16,30 @@ const els = {
   status: document.getElementById("status"),
   filter: document.getElementById("filter"),
   tree: document.getElementById("tree"),
-  src: document.getElementById("src"),
   srcMeta: document.getElementById("srcMeta"),
+  srcCallBlock: document.getElementById("srcCallBlock"),
+  srcCallLabel: document.getElementById("srcCallLabel"),
+  srcCall: document.getElementById("srcCall"),
+  srcDefBlock: document.getElementById("srcDefBlock"),
+  srcDefLabel: document.getElementById("srcDefLabel"),
+  srcDef: document.getElementById("srcDef"),
   crumbs: document.getElementById("crumbs"),
   back: document.getElementById("back"),
   forward: document.getElementById("forward"),
 };
+
+function renderSnippet(pre, snippet) {
+  const lines = (snippet.text || "").split("\n");
+  pre.innerHTML = lines
+    .map((line, i) => {
+      const n = snippet.start_line + i;
+      const hl = n === snippet.highlight_line ? " hl" : "";
+      return `<span class="line${hl}"><span class="ln">${n}</span>${esc(line)}</span>`;
+    })
+    .join("");
+  const hlEl = pre.querySelector(".line.hl");
+  if (hlEl) hlEl.scrollIntoView({ block: "center", behavior: "smooth" });
+}
 
 async function api(path, options) {
   const res = await fetch(path, {
@@ -58,9 +76,18 @@ function pushHistory(symbol) {
     name: symbol.name,
     path: symbol.location.path,
     line: symbol.location.line,
+    call_site: !!symbol.call_site,
+    def_location: symbol.def_location || null,
   };
   state.history = state.history.slice(0, state.historyIndex + 1);
-  if (state.history[state.historyIndex]?.id === step.id) {
+  const cur = state.history[state.historyIndex];
+  if (
+    cur &&
+    cur.id === step.id &&
+    cur.line === step.line &&
+    cur.path === step.path &&
+    cur.call_site === step.call_site
+  ) {
     updateNav();
     return;
   }
@@ -76,32 +103,39 @@ async function selectSymbol(symbol, record = true) {
   if (record) pushHistory(symbol);
   if (symbol.kind === "directory") {
     els.srcMeta.textContent = symbol.location.path;
-    els.src.textContent = "(directory — expand with + to browse)";
+    els.srcCallBlock.hidden = true;
+    els.srcDefLabel.textContent = "directory";
+    els.srcDef.textContent = "(directory — expand with + to browse)";
     return;
   }
-  // Call-site rows (callers/callees) carry the exact line of the call — open there,
-  // not around the function/class definition.
-  let url = `/api/source/${symbol.id}`;
+
+  // Call edges: show both the call site and the related symbol's definition.
   if (symbol.call_site && symbol.location && symbol.location.line) {
-    const qs = new URLSearchParams({
+    const callQs = new URLSearchParams({
       line: String(symbol.location.line),
       path: symbol.location.path || "",
     });
-    url += `?${qs.toString()}`;
+    const [callSnippet, defSnippet] = await Promise.all([
+      api(`/api/source/${symbol.id}?${callQs.toString()}`),
+      api(`/api/source/${symbol.id}`),
+    ]);
+    const callFocus = callSnippet.highlight_line || symbol.location.line;
+    const defFocus = defSnippet.highlight_line || (symbol.def_location && symbol.def_location.line);
+    els.srcMeta.textContent = `${callSnippet.path}:${callFocus} → ${defSnippet.path}:${defFocus}`;
+    els.srcCallBlock.hidden = false;
+    els.srcCallLabel.textContent = `call site · ${callSnippet.path}:${callFocus}`;
+    els.srcDefLabel.textContent = `definition · ${defSnippet.path}:${defFocus}`;
+    renderSnippet(els.srcCall, callSnippet);
+    renderSnippet(els.srcDef, defSnippet);
+    return;
   }
-  const snippet = await api(url);
+
+  const snippet = await api(`/api/source/${symbol.id}`);
   const focus = snippet.highlight_line || symbol.location.line;
   els.srcMeta.textContent = `${snippet.path}:${focus} · ${snippet.start_line}-${snippet.end_line}`;
-  const lines = (snippet.text || "").split("\n");
-  els.src.innerHTML = lines
-    .map((line, i) => {
-      const n = snippet.start_line + i;
-      const hl = n === snippet.highlight_line ? " hl" : "";
-      return `<span class="line${hl}"><span class="ln">${n}</span>${esc(line)}</span>`;
-    })
-    .join("");
-  const hlEl = els.src.querySelector(".line.hl");
-  if (hlEl) hlEl.scrollIntoView({ block: "center", behavior: "smooth" });
+  els.srcCallBlock.hidden = true;
+  els.srcDefLabel.textContent = `definition · ${snippet.path}:${focus}`;
+  renderSnippet(els.srcDef, snippet);
 }
 
 function symbolButton(symbol) {
@@ -213,6 +247,7 @@ async function loadBranches(symbol, container, ancestors = []) {
           ? {
               ...s,
               call_site: true,
+              def_location: s.location,
               location: {
                 ...s.location,
                 path: site.path || s.location.path,
@@ -364,21 +399,34 @@ async function init() {
     clearTimeout(t);
     t = setTimeout(loadTree, 150);
   });
+  async function restoreStep(step) {
+    const data = await api(`/api/symbol/${step.id}`);
+    const symbol = step.call_site
+      ? {
+          ...data.symbol,
+          call_site: true,
+          def_location: step.def_location || data.symbol.location,
+          location: {
+            ...data.symbol.location,
+            path: step.path,
+            line: step.line,
+          },
+        }
+      : data.symbol;
+    await selectSymbol(symbol, false);
+  }
+
   els.back.addEventListener("click", async () => {
     if (state.historyIndex <= 0) return;
     state.historyIndex -= 1;
     updateNav();
-    const step = state.history[state.historyIndex];
-    const data = await api(`/api/symbol/${step.id}`);
-    await selectSymbol(data.symbol, false);
+    await restoreStep(state.history[state.historyIndex]);
   });
   els.forward.addEventListener("click", async () => {
     if (state.historyIndex >= state.history.length - 1) return;
     state.historyIndex += 1;
     updateNav();
-    const step = state.history[state.historyIndex];
-    const data = await api(`/api/symbol/${step.id}`);
-    await selectSymbol(data.symbol, false);
+    await restoreStep(state.history[state.historyIndex]);
   });
 }
 
