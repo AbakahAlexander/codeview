@@ -185,12 +185,30 @@ async function loadBranches(symbol, container, ancestors = []) {
       const seen = new Set();
       const unique = [];
       const back = [];
+      const perCallSite = branch.kind === "calls" || branch.kind === "called_by";
       for (const r of relations) {
         const s = r.to_symbol;
-        if (!s || s.id === symbol.id || seen.has(s.id)) continue;
-        seen.add(s.id);
-        if (blocked.has(s.id)) back.push(s);
-        else unique.push(s);
+        if (!s || s.id === symbol.id) continue;
+        // Callers/callees: one row per call site (same symbol on two lines stays visible).
+        const site = r.location || {};
+        const key = perCallSite
+          ? `${s.id}@${site.path || ""}:${site.line || ""}`
+          : s.id;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const display = perCallSite && site.line
+          ? {
+              ...s,
+              location: {
+                ...s.location,
+                path: site.path || s.location.path,
+                line: site.line,
+                column: site.column ?? 0,
+              },
+            }
+          : s;
+        if (blocked.has(s.id)) back.push(display);
+        else unique.push(display);
       }
       return {
         branch,
@@ -251,7 +269,22 @@ async function loadTree() {
     els.tree.innerHTML = `<li class="empty">${q ? "no matches" : "empty"}</li>`;
     return;
   }
-  data.results.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
+  const entryCount = data.entry_point_count || 0;
+  if (!q && entryCount > 0) {
+    const header = document.createElement("li");
+    header.innerHTML = `<div class="group">entry points (${entryCount})</div>`;
+    els.tree.appendChild(header);
+    data.results.slice(0, entryCount).forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
+    const rest = data.results.slice(entryCount);
+    if (rest.length) {
+      const other = document.createElement("li");
+      other.innerHTML = `<div class="group">symbols</div>`;
+      els.tree.appendChild(other);
+      rest.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
+    }
+  } else {
+    data.results.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
+  }
   updateNav();
 }
 

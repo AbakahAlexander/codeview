@@ -10,6 +10,7 @@ from codeview.detect import (
     provider_name_for_path,
     provider_name_for_symbol_language,
 )
+from codeview.entrypoints import find_dunder_main_files, parse_project_scripts
 from codeview.fsutil import browse, count_source_files
 from codeview.models import IndexStats, RelationKind, Symbol, SymbolKind
 from codeview.paths import indexes_dir, scip_cache_dir
@@ -355,6 +356,60 @@ class ExplorerService:
         store.set_meta("indexed_at", datetime.now(timezone.utc).isoformat())
         store.set_meta("duration_ms", str(duration_ms))
         store.set_meta("file_count", str(file_count))
+
+    def entry_points(self, *, limit: int = 40) -> list[Symbol]:
+        """Resolve packaging / ``__main__`` entry points to indexed symbols."""
+        store = self.ensure_store()
+        root = Path(store.get_meta("root") or ".")
+        found: list[Symbol] = []
+        seen: set[str] = set()
+
+        def add(sym: Symbol | None) -> None:
+            if not sym or sym.id in seen:
+                return
+            seen.add(sym.id)
+            found.append(sym)
+
+        for _cmd, module, func_name in parse_project_scripts(root):
+            # module path: codeview.cli → codeview/cli.py
+            rel = module.replace(".", "/") + ".py"
+            hits = [
+                s
+                for s in store.search(func_name, limit=30)
+                if s.name == func_name
+                and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
+                and (
+                    s.location.path == rel
+                    or s.location.path.endswith("/" + rel)
+                    or s.qualname.replace("`", "").find(module) >= 0
+                )
+            ]
+            if hits:
+                add(hits[0])
+                continue
+            # Fallback: any exact name match preferring the module path.
+            loose = [s for s in store.search(func_name, limit=20) if s.name == func_name]
+            prefer = [s for s in loose if rel in s.location.path]
+            add((prefer or loose or [None])[0])
+
+        for rel in find_dunder_main_files(root):
+            # Prefer the file module symbol; also surface a main() in that file if present.
+            modules = [
+                s
+                for s in store.symbols_in_path(rel)
+                if s.kind == SymbolKind.MODULE and s.signature == "file"
+            ]
+            if modules:
+                add(modules[0])
+            mains = [
+                s
+                for s in store.symbols_in_path(rel)
+                if s.name == "main" and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
+            ]
+            for sym in mains:
+                add(sym)
+
+        return found[:limit]
 
     def browse(self, path: str = "") -> list[Symbol]:
         store = self.ensure_store()
