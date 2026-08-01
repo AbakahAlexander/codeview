@@ -205,11 +205,19 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
         }
 
     @app.get("/api/source/{symbol_id}")
-    def source(symbol_id: str) -> dict:
+    def source(
+        symbol_id: str,
+        line: int | None = None,
+        path: str | None = None,
+    ) -> dict:
         if not service.store:
             raise HTTPException(status_code=400, detail="No index loaded")
         try:
-            snippet = service.source(symbol_id)
+            snippet = service.source(
+                symbol_id,
+                focus_line=line,
+                focus_path=path,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return snippet.to_dict()

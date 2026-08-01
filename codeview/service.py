@@ -494,14 +494,54 @@ class ExplorerService:
             store.mark_expanded(symbol_id, relation_kind)
             return store.relations_enriched(symbol_id, relation_kind, limit=limit)
 
-    def source(self, symbol_id: str):
+    def source(
+        self,
+        symbol_id: str,
+        *,
+        focus_line: int | None = None,
+        focus_path: str | None = None,
+        context_lines: int = 12,
+    ):
+        """Return source around a symbol, or around an explicit call-site line."""
         store = self.ensure_store()
         symbol = store.get_symbol(symbol_id)
         if not symbol:
             raise KeyError(f"Unknown symbol: {symbol_id}")
         root = Path(store.get_meta("root") or ".")
+        if focus_line is not None and focus_line > 0:
+            rel = focus_path or symbol.location.path
+            return self._snippet_at(root, rel, focus_line, context_lines=context_lines)
         provider = self.provider_for_symbol(symbol)
-        return provider.source_for(root, symbol)
+        return provider.source_for(root, symbol, context_lines=context_lines)
+
+    @staticmethod
+    def _snippet_at(
+        root: Path,
+        rel: str,
+        line: int,
+        *,
+        context_lines: int = 12,
+    ):
+        from codeview.models import SourceSnippet
+
+        path = root / rel
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return SourceSnippet(path=rel, start_line=1, end_line=1, text="", highlight_line=1)
+        lines = text.splitlines()
+        if not lines:
+            return SourceSnippet(path=rel, start_line=1, end_line=1, text="", highlight_line=1)
+        focus = min(max(1, line), len(lines))
+        start = max(1, focus - context_lines)
+        end = min(len(lines), focus + context_lines)
+        return SourceSnippet(
+            path=rel,
+            start_line=start,
+            end_line=end,
+            text="\n".join(lines[start - 1 : end]),
+            highlight_line=focus,
+        )
 
     def upsert_ephemeral(self, symbols: list[Symbol]) -> None:
         store = self.ensure_store()

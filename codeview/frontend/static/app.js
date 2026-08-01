@@ -79,8 +79,19 @@ async function selectSymbol(symbol, record = true) {
     els.src.textContent = "(directory — expand with + to browse)";
     return;
   }
-  const snippet = await api(`/api/source/${symbol.id}`);
-  els.srcMeta.textContent = `${snippet.path}:${snippet.start_line}-${snippet.end_line}`;
+  // Call-site rows (callers/callees) carry the exact line of the call — open there,
+  // not around the function/class definition.
+  let url = `/api/source/${symbol.id}`;
+  if (symbol.call_site && symbol.location && symbol.location.line) {
+    const qs = new URLSearchParams({
+      line: String(symbol.location.line),
+      path: symbol.location.path || "",
+    });
+    url += `?${qs.toString()}`;
+  }
+  const snippet = await api(url);
+  const focus = snippet.highlight_line || symbol.location.line;
+  els.srcMeta.textContent = `${snippet.path}:${focus} · ${snippet.start_line}-${snippet.end_line}`;
   const lines = (snippet.text || "").split("\n");
   els.src.innerHTML = lines
     .map((line, i) => {
@@ -89,6 +100,8 @@ async function selectSymbol(symbol, record = true) {
       return `<span class="line${hl}"><span class="ln">${n}</span>${esc(line)}</span>`;
     })
     .join("");
+  const hlEl = els.src.querySelector(".line.hl");
+  if (hlEl) hlEl.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 function symbolButton(symbol) {
@@ -199,6 +212,7 @@ async function loadBranches(symbol, container, ancestors = []) {
         const display = perCallSite && site.line
           ? {
               ...s,
+              call_site: true,
               location: {
                 ...s.location,
                 path: site.path || s.location.path,
@@ -270,21 +284,12 @@ async function loadTree() {
     return;
   }
   const entryCount = data.entry_point_count || 0;
-  if (!q && entryCount > 0) {
+  if (!q && (data.mode === "entrypoints" || entryCount > 0)) {
     const header = document.createElement("li");
-    header.innerHTML = `<div class="group">entry points (${entryCount})</div>`;
+    header.innerHTML = `<div class="group">entry points</div>`;
     els.tree.appendChild(header);
-    data.results.slice(0, entryCount).forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
-    const rest = data.results.slice(entryCount);
-    if (rest.length) {
-      const other = document.createElement("li");
-      other.innerHTML = `<div class="group">symbols</div>`;
-      els.tree.appendChild(other);
-      rest.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
-    }
-  } else {
-    data.results.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
   }
+  data.results.forEach((s) => els.tree.appendChild(makeSymbolNode(s)));
   updateNav();
 }
 
