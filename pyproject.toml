@@ -5,16 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codeview"
 version = "0.1.0"
-description = "Local-first, IDE-independent code explorer"
+description = "Local-first, IDE-independent code explorer powered by SCIP indexes"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Alexander Abakah" }]
 dependencies = [
   "fastapi>=0.115.0",
-  "uvicorn[standard]>=0.30.0",
+  "uvicorn>=0.30.0",
   "jinja2>=3.1.0",
-  "python-multipart>=0.0.9",
   "protobuf>=5.0.0",
 ]
 
@@ -30,4 +29,7 @@ where = ["."]
 include = ["codeview*"]
 
 [tool.setuptools.package-data]
-codeview = ["server/static/*", "server/templates/*", "frontend/static/*", "frontend/templates/*", "providers/scip/*.py"]
+codeview = ["frontend/static/*", "frontend/templates/*", "providers/scip/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,6 +1,8 @@
 # Codeview
 
-Local-first code explorer. Point it at a project, open from entry points, expand callers and callees, read source.
+Local-first, IDE-independent code explorer powered by SCIP indexes.
+
+Point it at a project, open from entry points, expand callers and callees, read source.
 
 No cloud. No AI. No IDE required.
 

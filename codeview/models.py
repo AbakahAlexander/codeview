@@ -112,3 +112,44 @@ class IndexStats:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class EntryPointKind(str, Enum):
+    CLI = "cli"
+    FRONTEND = "frontend"
+    LIBRARY = "library"
+    NATIVE_MAIN = "native_main"
+    MODULE = "module"
+    INFERRED = "inferred"
+
+
+class Confidence(str, Enum):
+    CONFIRMED = "confirmed"
+    LIKELY = "likely"
+    INFERRED = "inferred"
+
+
+@dataclass(slots=True)
+class EntryPoint:
+    """Resolved program root: detection evidence + optional SCIP symbol."""
+
+    category: EntryPointKind
+    display_name: str
+    source: str
+    confidence: Confidence
+    symbol_id: str | None = None
+    target: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    symbol: Symbol | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "category": self.category.value,
+            "display_name": self.display_name,
+            "source": self.source,
+            "confidence": self.confidence.value,
+            "symbol_id": self.symbol_id,
+            "target": self.target,
+            "evidence": list(self.evidence),
+            "symbol": self.symbol.to_dict() if self.symbol else None,
+        }

@@ -24,15 +24,22 @@ Git URL peeks use your local `git` credentials, so **private** GitHub repos work
 
 ## Entry points
 
+Detection is split by ecosystem (`codeview/entrypoints/`), then mapped onto SCIP symbols:
+
+```text
+package/build evidence → EntryPointCandidate → SCIP symbol → EntryPoint
+```
+
 | Kind | How Codeview finds them |
 |------|-------------------------|
-| Python | `[project.scripts]`, `__main__.py`, `if __name__ == "__main__"` → `main()` |
-| JS / TS | `index.html` module scripts; `package.json` `bin` / `main` / `module` / `exports`; then Vite/Next-style roots (`src/main.tsx`, `app/page.tsx`, …). Thin bootstraps (e.g. `main.tsx`) also list imported in-project symbols (e.g. `Game`). Expand a file module for **uses** when contains/calls are empty. |
-| Apps (C/C++/Java/…) | `main` / `WinMain` (non-test paths preferred) |
-| CMake apps | Sources listed in `add_executable(...)` |
-| JVM libraries (no `main`) | Public types under paths like `api/src/main/java` |
+| Python | `[project.scripts]`, `__main__.py`, `if __name__ == "__main__"` |
+| JS / TS | HTML module scripts and `package.json` `bin` first; `main`/`module` if nothing stronger; Vite/Next bootstraps (`src/main.tsx`, `app/page.tsx`). `exports` only when no executable root. Thin bootstraps also list imported symbols. |
+| CMake | Sources in `add_executable(...)` → `main` |
+| Native/JVM apps | Indexed `main` / `WinMain` |
+| JVM libraries | Public types under `api/src/main/java`, … |
+| Monorepos | Also scans `packages/*`, `apps/*`, `services/*` |
 
-If nothing matches, the tree falls back to searchable symbols.
+Each resolved entry has a **category**, **confidence**, and **evidence** (see `EntryPoint` in `models.py`). If nothing matches, the tree falls back to searchable symbols.
 
 ## Data layout
 

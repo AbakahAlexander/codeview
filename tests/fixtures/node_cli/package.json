@@ -1,0 +1,1 @@
+{"name":"node-cli","bin":{"widget":"./src/cli.ts"},"exports":{"./lib":"./src/lib.ts"}}
