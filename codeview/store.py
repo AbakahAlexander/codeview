@@ -276,6 +276,19 @@ class SymbolStore:
             ).fetchall()
         return [self._row_to_symbol(row) for row in rows]
 
+    def file_modules(self, limit: int = 500) -> list[Symbol]:
+        """Source files from the index (SCIP documents), for a file-first tree."""
+        rows = self._conn.execute(
+            """
+            SELECT * FROM symbols
+            WHERE kind = 'module' AND signature = 'file'
+            ORDER BY path
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [self._row_to_symbol(row) for row in rows]
+
     def relations_for(self, symbol_id: str, kind: RelationKind | str | None = None) -> list[dict[str, Any]]:
         if kind is None:
             rows = self._conn.execute(

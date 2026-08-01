@@ -138,15 +138,15 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
 
         effective = limit if q.strip() else min(limit, 400)
         if q.strip():
-            # Substring search over indexed symbol names (SQLite LIKE — not Elasticsearch).
             hits = [
                 s
                 for s in store.search(q.strip(), limit=effective)
                 if s.kind.value in {"class", "function", "method", "interface"}
             ]
             return {"results": [s.to_dict() for s in hits], "mode": "search", "truncated": len(hits) >= effective}
-        symbols = store.top_level(query=None, limit=effective)
-        return {"results": [s.to_dict() for s in symbols], "mode": "symbols", "truncated": len(symbols) >= effective}
+        # File-first tree: show indexed source files, expand into symbols.
+        files = store.file_modules(limit=effective)
+        return {"results": [s.to_dict() for s in files], "mode": "files", "truncated": len(files) >= effective}
 
     @app.get("/api/symbol/{symbol_id}")
     def get_symbol(symbol_id: str) -> dict:

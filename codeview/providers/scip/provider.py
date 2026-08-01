@@ -12,8 +12,6 @@ from codeview.providers.scip import scip_pb2
 # SCIP SymbolRole bits (see scip.proto)
 ROLE_DEFINITION = 1
 ROLE_IMPORT = 2
-ROLE_WRITE = 4
-ROLE_READ = 8
 
 
 def _stable_id(*parts: object) -> str:
@@ -21,40 +19,69 @@ def _stable_id(*parts: object) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _display_name(scip_symbol: str) -> str:
-    # Rough: take last meaningful descriptor piece.
-    # Example: .../`Class`#`method`() → method or Class
-    parts = re.findall(r"`([^`]+)`", scip_symbol)
-    if parts:
-        return parts[-1]
-    return scip_symbol.split("/")[-1] or scip_symbol
+def _descriptor_tail(scip_symbol: str) -> str:
+    if not scip_symbol or scip_symbol.startswith("local "):
+        return scip_symbol
+    return scip_symbol.rsplit("/", 1)[-1]
 
 
-def _kind_from_symbol(scip_symbol: str, display: str) -> SymbolKind:
-    s = scip_symbol.lower()
-    if "#`" in scip_symbol or "()." in scip_symbol or scip_symbol.endswith("()."):
-        return SymbolKind.METHOD
-    if "()" in scip_symbol:
-        return SymbolKind.FUNCTION
-    if any(x in s for x in ("interface", "trait", "protocol")):
-        return SymbolKind.INTERFACE
-    if display[:1].isupper():
-        return SymbolKind.CLASS
-    return SymbolKind.UNKNOWN
+def _parse_symbol(scip_symbol: str) -> tuple[str, SymbolKind, bool]:
+    """Return (display_name, kind, navigable_in_tree)."""
+    if not scip_symbol or scip_symbol.startswith("local "):
+        return (scip_symbol or "local"), SymbolKind.UNKNOWN, False
+
+    tail = _descriptor_tail(scip_symbol)
+
+    if re.search(r"\(\)\.\([^)]+\)$", tail):
+        name = tail.rsplit(".(", 1)[-1].rstrip(")")
+        return name or "param", SymbolKind.PARAMETER, False
+
+    m = re.match(r"^([^#]+)#([^#.]+)\(\)\.$", tail)
+    if m:
+        return m.group(2), SymbolKind.METHOD, True
+
+    m = re.match(r"^([^#.]+)\(\)\.$", tail)
+    if m:
+        return m.group(1), SymbolKind.FUNCTION, True
+
+    m = re.match(r"^([^#.]+)#$", tail)
+    if m:
+        return m.group(1), SymbolKind.CLASS, True
+
+    m = re.match(r"^([^#]+)#([^#.]+)\.$", tail)
+    if m:
+        return m.group(2), SymbolKind.PROPERTY, False
+
+    m = re.match(r"^([^#.]+)\.$", tail)
+    if m:
+        return m.group(1), SymbolKind.VARIABLE, False
+
+    m = re.match(r"^([^:]+):$", tail)
+    if m:
+        return m.group(1), SymbolKind.MODULE, False
+
+    ticks = re.findall(r"`([^`]+)`", scip_symbol)
+    if ticks:
+        return ticks[-1], SymbolKind.UNKNOWN, False
+    return tail or scip_symbol, SymbolKind.UNKNOWN, False
+
+
+def _enclosing_type_name(scip_symbol: str) -> str | None:
+    tail = _descriptor_tail(scip_symbol)
+    m = re.match(r"^([^#]+)#", tail)
+    return m.group(1) if m else None
 
 
 def find_scip_index(root: Path, explicit: Path | None = None) -> Path | None:
     if explicit and explicit.is_file():
         return explicit
-    candidates = [
+    for path in (
         root / "index.scip",
         root / ".scip" / "index.scip",
         root / "scip" / "index.scip",
-    ]
-    for path in candidates:
+    ):
         if path.is_file():
             return path
-    # First *.scip under root (shallow)
     for path in sorted(root.glob("*.scip")):
         if path.is_file():
             return path
@@ -62,7 +89,7 @@ def find_scip_index(root: Path, explicit: Path | None = None) -> Path | None:
 
 
 class ScipProvider(GraphProvider):
-    """Consume an existing SCIP index — Codeview does not replace scip-java/python/etc."""
+    """Consume a SCIP index into Codeview's exploration store."""
 
     name = "scip"
     languages = ("*",)
@@ -77,7 +104,7 @@ class ScipProvider(GraphProvider):
         self._relations: list[Relation] = []
 
     def source_extensions(self) -> set[str]:
-        return set()  # browse uses filesystem separately
+        return set()
 
     def source_globs(self) -> list[str]:
         return ["*.*"]
@@ -91,9 +118,8 @@ class ScipProvider(GraphProvider):
                 "No project index is available yet. Codeview builds one automatically on serve."
             )
         self.index_path = path
-        data = path.read_bytes()
         index = scip_pb2.Index()
-        index.ParseFromString(data)
+        index.ParseFromString(path.read_bytes())
         self._index = index
         return index
 
@@ -103,6 +129,8 @@ class ScipProvider(GraphProvider):
         self._by_scip.clear()
         self._relations = []
         symbols: list[Symbol] = []
+        type_by_file: dict[tuple[str, str], Symbol] = {}
+        navigable_ids: set[str] = set()
 
         for doc in index.documents:
             rel = doc.relative_path
@@ -120,7 +148,6 @@ class ScipProvider(GraphProvider):
             symbols.append(module)
             self._by_scip[f"file:{rel}"] = module
 
-            # Definitions from occurrences
             defined: dict[str, tuple[int, int]] = {}
             for occ in doc.occurrences:
                 if occ.symbol_roles & ROLE_DEFINITION:
@@ -128,11 +155,20 @@ class ScipProvider(GraphProvider):
                     col = occ.range[1] if len(occ.range) > 1 else 0
                     defined[occ.symbol] = (line, col)
 
+            file_syms: list[tuple[Symbol, bool]] = []
             for info in doc.symbols:
                 scip_sym = info.symbol
-                display = _display_name(scip_sym)
+                display, kind, navigable = _parse_symbol(scip_sym)
                 line, col = defined.get(scip_sym, (1, 0))
-                kind = _kind_from_symbol(scip_sym, display)
+                docs = list(info.documentation) if info.documentation else []
+                signature = None
+                for line_doc in docs:
+                    if "def " in line_doc or "class " in line_doc:
+                        signature = line_doc.strip()[:160]
+                        break
+                if signature is None and docs:
+                    signature = docs[0][:160]
+
                 sym = Symbol(
                     id=_stable_id("scip", scip_sym),
                     name=display,
@@ -140,29 +176,55 @@ class ScipProvider(GraphProvider):
                     location=Location(path=rel, line=line, column=col),
                     qualname=scip_sym,
                     language=language,
-                    signature=(info.documentation[0][:160] if info.documentation else None),
-                    docstring="\n".join(info.documentation) if info.documentation else None,
+                    signature=signature,
+                    docstring="\n".join(docs) if docs else None,
                     container_id=module_id,
                 )
                 symbols.append(sym)
+                file_syms.append((sym, navigable))
                 self._by_scip[scip_sym] = sym
-                self._relations.append(
-                    Relation(kind=RelationKind.CONTAINED_IN, from_id=sym.id, to_id=module_id)
-                )
-                self._relations.append(
-                    Relation(kind=RelationKind.CONTAINS, from_id=module_id, to_id=sym.id)
-                )
+                if navigable:
+                    navigable_ids.add(sym.id)
+                if kind == SymbolKind.CLASS:
+                    type_by_file[(rel, display)] = sym
 
+            # Containment: file → class/function; class → method
+            for sym, navigable in file_syms:
+                parent_type = _enclosing_type_name(sym.qualname)
+                parent = type_by_file.get((rel, parent_type)) if parent_type else None
+                if sym.kind == SymbolKind.METHOD and parent is not None:
+                    sym.container_id = parent.id
+                    self._relations.append(
+                        Relation(kind=RelationKind.CONTAINED_IN, from_id=sym.id, to_id=parent.id)
+                    )
+                    self._relations.append(
+                        Relation(kind=RelationKind.CONTAINS, from_id=parent.id, to_id=sym.id)
+                    )
+                elif navigable and sym.kind in {
+                    SymbolKind.CLASS,
+                    SymbolKind.FUNCTION,
+                    SymbolKind.INTERFACE,
+                }:
+                    self._relations.append(
+                        Relation(kind=RelationKind.CONTAINED_IN, from_id=sym.id, to_id=module_id)
+                    )
+                    self._relations.append(
+                        Relation(kind=RelationKind.CONTAINS, from_id=module_id, to_id=sym.id)
+                    )
+
+            for info in doc.symbols:
+                sym = self._by_scip.get(info.symbol)
+                if not sym:
+                    continue
                 for reln in info.relationships:
                     other = reln.symbol
-                    # Ensure placeholder for external symbols
                     if other not in self._by_scip:
-                        od = _display_name(other)
+                        od, ok, _nav = _parse_symbol(other)
                         placeholder = Symbol(
                             id=_stable_id("scip", other),
                             name=od,
-                            kind=_kind_from_symbol(other, od),
-                            location=Location(path=rel, line=line, column=0),
+                            kind=ok,
+                            location=Location(path=rel, line=sym.location.line, column=0),
                             qualname=other,
                             language=language,
                             signature="external",
@@ -172,11 +234,7 @@ class ScipProvider(GraphProvider):
                     target = self._by_scip[other]
                     if reln.is_implementation:
                         self._relations.append(
-                            Relation(
-                                kind=RelationKind.IMPLEMENTS,
-                                from_id=sym.id,
-                                to_id=target.id,
-                            )
+                            Relation(kind=RelationKind.IMPLEMENTS, from_id=sym.id, to_id=target.id)
                         )
                         self._relations.append(
                             Relation(
@@ -201,23 +259,41 @@ class ScipProvider(GraphProvider):
                             )
                         )
 
-            # Reference occurrences → referenced_by / references
+            def_entries: list[tuple[int, Symbol]] = []
+            for scip_sym, (dline, _) in defined.items():
+                cand = self._by_scip.get(scip_sym)
+                if cand and cand.kind in {
+                    SymbolKind.FUNCTION,
+                    SymbolKind.METHOD,
+                    SymbolKind.CLASS,
+                }:
+                    def_entries.append((dline, cand))
+            def_entries.sort(key=lambda x: x[0])
+
             for occ in doc.occurrences:
                 if not occ.symbol or (occ.symbol_roles & ROLE_DEFINITION):
                     continue
                 target = self._by_scip.get(occ.symbol)
                 if not target:
                     continue
+                if target.kind == SymbolKind.PARAMETER:
+                    continue
+                if target.qualname.startswith("local "):
+                    continue
+
                 line = (occ.range[0] + 1) if occ.range else 1
-                # Enclosing definition in this file: nearest prior definition line
                 enclosure = module
-                for info in doc.symbols:
-                    dline = defined.get(info.symbol, (10**9, 0))[0]
+                for dline, cand in def_entries:
                     if dline <= line:
-                        cand = self._by_scip.get(info.symbol)
-                        if cand and cand.location.line >= enclosure.location.line:
-                            enclosure = cand
-                loc = Location(path=rel, line=line, column=occ.range[1] if len(occ.range) > 1 else 0)
+                        enclosure = cand
+                    else:
+                        break
+
+                loc = Location(
+                    path=rel,
+                    line=line,
+                    column=occ.range[1] if len(occ.range) > 1 else 0,
+                )
                 self._relations.append(
                     Relation(
                         kind=RelationKind.REFERENCED_BY,
@@ -234,23 +310,30 @@ class ScipProvider(GraphProvider):
                         location=loc,
                     )
                 )
-                # Exploration UI uses callers/callees; map precise refs into those kinds.
-                self._relations.append(
-                    Relation(
-                        kind=RelationKind.CALLED_BY,
-                        from_id=target.id,
-                        to_id=enclosure.id,
-                        location=loc,
+
+                is_import = bool(occ.symbol_roles & ROLE_IMPORT)
+                if (
+                    not is_import
+                    and target.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
+                    and enclosure.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
+                    and enclosure.id != target.id
+                ):
+                    self._relations.append(
+                        Relation(
+                            kind=RelationKind.CALLED_BY,
+                            from_id=target.id,
+                            to_id=enclosure.id,
+                            location=loc,
+                        )
                     )
-                )
-                self._relations.append(
-                    Relation(
-                        kind=RelationKind.CALLS,
-                        from_id=enclosure.id,
-                        to_id=target.id,
-                        location=loc,
+                    self._relations.append(
+                        Relation(
+                            kind=RelationKind.CALLS,
+                            from_id=enclosure.id,
+                            to_id=target.id,
+                            location=loc,
+                        )
                     )
-                )
 
         yield from symbols
 
@@ -265,7 +348,6 @@ class ScipProvider(GraphProvider):
         kind: RelationKind,
         symbols_by_id: dict[str, Symbol],
     ) -> list[Relation]:
-        # Relations are materialised at index time from SCIP.
         return []
 
     def source_for(self, root: Path, symbol: Symbol, context_lines: int = 12) -> SourceSnippet:
@@ -274,10 +356,14 @@ class ScipProvider(GraphProvider):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return SourceSnippet(path=symbol.location.path, start_line=1, end_line=1, text="", highlight_line=1)
+            return SourceSnippet(
+                path=symbol.location.path, start_line=1, end_line=1, text="", highlight_line=1
+            )
         lines = text.splitlines()
         if not lines:
-            return SourceSnippet(path=symbol.location.path, start_line=1, end_line=1, text="", highlight_line=1)
+            return SourceSnippet(
+                path=symbol.location.path, start_line=1, end_line=1, text="", highlight_line=1
+            )
         start = max(1, symbol.location.line - context_lines)
         end = min(len(lines), symbol.location.line + context_lines)
         return SourceSnippet(
