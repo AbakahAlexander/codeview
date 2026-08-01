@@ -1,0 +1,35 @@
+site_name: Codeview
+site_description: Local-first code explorer
+site_url: https://abakahalexander.github.io/codeview/
+repo_url: https://github.com/AbakahAlexander/codeview
+repo_name: AbakahAlexander/codeview
+edit_uri: ""
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  palette:
+    scheme: default
+    primary: black
+    accent: indigo
+  features:
+    - content.code.copy
+    - navigation.sections
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - tables
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Usage: usage.md
+  - Reference: reference.md
+
+plugins:
+  - search

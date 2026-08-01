@@ -1,0 +1,43 @@
+# Reference
+
+## Languages
+
+Indexed via SCIP when detection finds sources (dominant language first):
+
+| Language | Notes |
+|----------|--------|
+| Python | Strong; scripts / `__main__` entry points |
+| Java / Kotlin / Scala | Gradle/Maven + SemanticDB; `scip-java` fetched if needed |
+| C / C++ / CUDA | Needs `compile_commands.json` (or CMake synth); `scip-clang` fetched if needed |
+| JS / TS, Go, Rust, Ruby, C# | Supported when project layout matches the indexer |
+
+Mixed repos pick the **dominant** language by file count (e.g. Iceberg → Java, not two generated `.py` files).
+
+## Entry points
+
+| Kind | How Codeview finds them |
+|------|-------------------------|
+| Python | `[project.scripts]`, `__main__.py`, `if __name__ == "__main__"` → `main()` |
+| Apps (C/C++/Java/…) | `main` / `WinMain` (non-test paths preferred) |
+| CMake apps | Sources listed in `add_executable(...)` |
+| JVM libraries (no `main`) | Public types under paths like `api/src/main/java` |
+
+If nothing matches, the tree falls back to searchable symbols.
+
+## Data layout
+
+All under `~/.codeview/`:
+
+| Path | Purpose |
+|------|---------|
+| `indexes/` | SQLite graphs |
+| `scip/` | Per-project SCIP artifacts |
+| `bin/` | Downloaded indexers (`scip-java`, `scip-clang`, …) |
+| `tools/` | Helper tool installs (e.g. npm-based) |
+| `repos/` | Ephemeral clones for git URL peeks |
+
+Indexer binaries are shared across projects (~100s of MB once you use Java and/or C++). They are **not** removed when a git peek exits. They **are** removed by `codeview doctor --purge`.
+
+## License
+
+MIT — [Alexander Abakah](https://github.com/AbakahAlexander)
