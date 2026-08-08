@@ -135,6 +135,11 @@ def _parse_scripts_fallback(text: str) -> list[tuple[str, str, str]]:
     return out
 
 
+def _is_skipped_rel(rel: Path) -> bool:
+    """Skip VCS/venv dirs inside the project — not hidden parents like ``~/.codeview``."""
+    return any(part.startswith(".") or part in _SKIP for part in rel.parts)
+
+
 def find_dunder_main_files(root: Path, *, limit: int = 200) -> list[str]:
     root = root.resolve()
     found: list[str] = []
@@ -147,31 +152,31 @@ def find_dunder_main_files(root: Path, *, limit: int = 200) -> list[str]:
         found.append(rel)
 
     for path in root.rglob("__main__.py"):
-        if any(part.startswith(".") or part in _SKIP for part in path.parts):
-            continue
         try:
-            add(path.relative_to(root).as_posix())
+            rel = path.relative_to(root)
         except ValueError:
             continue
+        if _is_skipped_rel(rel):
+            continue
+        add(rel.as_posix())
         if len(found) >= limit:
             return found
 
     for path in root.rglob("*.py"):
         if path.name == "__main__.py":
             continue
-        if any(part.startswith(".") or part in _SKIP for part in path.parts):
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
             continue
-        if "site-packages" in path.parts:
+        if _is_skipped_rel(rel) or "site-packages" in rel.parts:
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         if _MAIN_GUARD.search(text):
-            try:
-                add(path.relative_to(root).as_posix())
-            except ValueError:
-                pass
+            add(rel.as_posix())
             if len(found) >= limit:
                 break
     return found

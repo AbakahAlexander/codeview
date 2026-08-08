@@ -91,15 +91,25 @@ def _enclosing_type_name(scip_symbol: str) -> str | None:
 
 
 def _definition_path_rank(path: str) -> int:
-    """Lower is better when the same SCIP symbol is defined in multiple files."""
+    """Lower is better when choosing a canonical cross-file target.
+
+    Each defining file still keeps its own symbol instance for call enclosure;
+    this rank only picks which instance cross-file references resolve to.
+    """
     p = path.replace("\\", "/").lstrip("./")
-    if p.startswith("tests/") or "/tests/" in p:
-        return 3
-    if p.startswith("benchmarks/") or "/benchmarks/" in p:
-        return 2
     if ".codeview" in p or "CMakeFiles" in p:
+        return 6
+    if p.startswith("deps/") or "/deps/" in p or p.startswith("third_party/"):
+        return 5
+    if p.startswith("tests/") or "/tests/" in p or "/test/" in p:
         return 4
-    return 0
+    if p.startswith("benchmarks/") or "/benchmarks/" in p:
+        return 3
+    if p.startswith("examples/") or "/examples/" in p or p.startswith("utils/"):
+        return 2
+    if p.startswith("src/") or p.startswith("lib/") or p.startswith("include/"):
+        return 0
+    return 1
 
 
 def _looks_like_call(line_text: str, name: str) -> bool:
@@ -107,6 +117,76 @@ def _looks_like_call(line_text: str, name: str) -> bool:
     if not name or not line_text:
         return False
     return bool(re.search(rf"\b{re.escape(name)}\s*\(", line_text))
+
+
+_CALL_IDENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_SKIP_LOCAL_CALL_NAMES = {
+    "print",
+    "len",
+    "str",
+    "int",
+    "float",
+    "list",
+    "dict",
+    "set",
+    "tuple",
+    "type",
+    "super",
+    "isinstance",
+    "issubclass",
+    "getattr",
+    "setattr",
+    "hasattr",
+    "enumerate",
+    "zip",
+    "map",
+    "filter",
+    "sorted",
+    "range",
+    "open",
+    "iter",
+    "next",
+    "Exception",
+    "BaseException",
+    "RuntimeError",
+    "ValueError",
+    "TypeError",
+    "ImportError",
+    "KeyError",
+    "AttributeError",
+    "StopIteration",
+    "AssertionError",
+    "NotImplementedError",
+}
+
+
+def _binding_location(root: Path, rel: str, name: str) -> Location | None:
+    """First import/assignment of ``name`` in ``rel`` (for unresolved locals)."""
+    path = root / rel
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    import_as = re.compile(rf"\bas\s+{re.escape(name)}\b")
+    assign = re.compile(rf"^\s*{re.escape(name)}\s*=")
+    for i, text in enumerate(lines, start=1):
+        if import_as.search(text) or assign.match(text):
+            col = text.find(name)
+            return Location(path=rel, line=i, column=max(col, 0))
+    return None
+
+
+def _call_name_on_line(line_text: str) -> str | None:
+    """Best-effort callee name from source text (e.g. ``cli_main()``)."""
+    if not line_text:
+        return None
+    # Prefer the last call on the line (``raise SystemExit(main())`` → main).
+    names = _CALL_IDENT.findall(line_text)
+    skip = {"if", "for", "while", "with", "elif", "return", "raise", "await", "not"}
+    for name in reversed(names):
+        if name not in skip:
+            return name
+    return None
 
 
 def find_scip_index(root: Path, explicit: Path | None = None) -> Path | None:
@@ -137,7 +217,10 @@ class ScipProvider(GraphProvider):
         self.index_path = index_path
         self.pending_symbols: list[Symbol] = []
         self._index: scip_pb2.Index | None = None
+        # Canonical target for cross-file references (one per SCIP symbol string).
         self._by_scip: dict[str, Symbol] = {}
+        # Per defining file — critical for C ``main`` and other TU-local symbols.
+        self._by_scip_file: dict[tuple[str, str], Symbol] = {}
         self._relations: list[Relation] = []
         self._file_lines: dict[str, list[str]] = {}
 
@@ -204,6 +287,7 @@ class ScipProvider(GraphProvider):
         root = root.resolve()
         index = self._load(root)
         self._by_scip.clear()
+        self._by_scip_file.clear()
         self._relations = []
         self._file_lines.clear()
         symbols: list[Symbol] = []
@@ -251,8 +335,19 @@ class ScipProvider(GraphProvider):
                 if signature is None and docs:
                     signature = docs[0][:160]
 
+                # One symbol instance per defining file. SCIP reuses the same
+                # symbol string for ``main`` (and similar) across TUs; collapsing
+                # them makes every call attribute to the wrong ``main``.
+                file_key = (scip_sym, rel)
+                if file_key in self._by_scip_file:
+                    sym = self._by_scip_file[file_key]
+                    file_syms.append((sym, navigable))
+                    if kind == SymbolKind.CLASS:
+                        type_by_file[(rel, display)] = sym
+                    continue
+
                 sym = Symbol(
-                    id=_stable_id("scip", scip_sym),
+                    id=_stable_id("scip", scip_sym, rel),
                     name=display,
                     kind=kind,
                     location=Location(path=rel, line=line, column=col),
@@ -262,25 +357,14 @@ class ScipProvider(GraphProvider):
                     docstring="\n".join(docs) if docs else None,
                     container_id=module_id,
                 )
-                # Same SCIP symbol can be defined in many TUs (e.g. int main()).
-                # Prefer project sources over tests/benchmarks for the canonical row.
-                prev = self._by_scip.get(scip_sym)
-                if prev is not None:
-                    if _definition_path_rank(prev.location.path) <= _definition_path_rank(rel):
-                        continue
-                    prev.location = Location(path=rel, line=line, column=col)
-                    prev.container_id = module_id
-                    prev.name = display
-                    prev.kind = kind
-                    if signature:
-                        prev.signature = signature
-                    file_syms.append((prev, navigable))
-                    if kind == SymbolKind.CLASS:
-                        type_by_file[(rel, display)] = prev
-                    continue
                 symbols.append(sym)
                 file_syms.append((sym, navigable))
-                self._by_scip[scip_sym] = sym
+                self._by_scip_file[file_key] = sym
+                prev = self._by_scip.get(scip_sym)
+                if prev is None or _definition_path_rank(rel) < _definition_path_rank(
+                    prev.location.path
+                ):
+                    self._by_scip[scip_sym] = sym
                 if kind == SymbolKind.CLASS:
                     type_by_file[(rel, display)] = sym
 
@@ -351,31 +435,25 @@ class ScipProvider(GraphProvider):
             defined = defined_by_file.get(rel, {})
 
             def_entries: list[tuple[int, Symbol]] = []
+            same_file_fns: dict[str, Symbol] = {}
             for scip_sym, (dline, _) in defined.items():
-                cand = self._by_scip.get(scip_sym)
+                # Always prefer the definition instance from THIS file.
+                cand = self._by_scip_file.get((scip_sym, rel)) or self._by_scip.get(
+                    scip_sym
+                )
                 if cand and cand.kind in {
                     SymbolKind.FUNCTION,
                     SymbolKind.METHOD,
                     SymbolKind.CLASS,
                 }:
                     def_entries.append((dline, cand))
+                    if cand.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}:
+                        same_file_fns.setdefault(cand.name, cand)
             def_entries.sort(key=lambda x: x[0])
 
             for occ in doc.occurrences:
                 if not occ.symbol or (occ.symbol_roles & ROLE_DEFINITION):
                     continue
-                target = self._ensure_symbol(
-                    occ.symbol,
-                    rel=rel,
-                    line=(occ.range[0] + 1) if occ.range else 1,
-                    language=language,
-                    symbols=symbols,
-                )
-                if target.kind == SymbolKind.PARAMETER:
-                    continue
-                if target.qualname.startswith("local "):
-                    continue
-
                 line = (occ.range[0] + 1) if occ.range else 1
                 enclosure = module
                 for dline, cand in def_entries:
@@ -403,6 +481,83 @@ class ScipProvider(GraphProvider):
                     line=line,
                     column=occ.range[1] if len(occ.range) > 1 else 0,
                 )
+
+                # Local bindings (e.g. ``main as cli_main`` then ``cli_main()``): SCIP
+                # often never resolves the call to a real function. Still record a
+                # call edge so the callee list matches what you read in source.
+                if occ.symbol.startswith("local "):
+                    if enclosure.kind not in _CALLER_KINDS:
+                        continue
+                    line_text = self._line_text(root, rel, line)
+                    call_name = _call_name_on_line(line_text)
+                    if (
+                        not call_name
+                        or call_name in _SKIP_LOCAL_CALL_NAMES
+                        or not _looks_like_call(line_text, call_name)
+                    ):
+                        continue
+                    # Prefer a real same-file definition over a synthetic unresolved.
+                    local_sym = same_file_fns.get(call_name)
+                    if local_sym is None:
+                        local_id = _stable_id("local-call", rel, call_name)
+                        local_sym = self._by_scip.get(local_id)
+                        if local_sym is None:
+                            bind = _binding_location(root, rel, call_name) or loc
+                            local_sym = Symbol(
+                                id=local_id,
+                                name=call_name,
+                                kind=SymbolKind.FUNCTION,
+                                location=bind,
+                                qualname=f"local {call_name}",
+                                language=language,
+                                signature="unresolved",
+                            )
+                            self._by_scip[local_id] = local_sym
+                            symbols.append(local_sym)
+                        # Never treat the call site as the symbol's definition site.
+                        if (
+                            local_sym.location.line == loc.line
+                            and local_sym.location.path == loc.path
+                        ):
+                            bind = _binding_location(root, rel, call_name)
+                            if bind and (
+                                bind.line != loc.line or bind.path != loc.path
+                            ):
+                                local_sym.location = bind
+                    if enclosure.id == local_sym.id:
+                        continue
+                    self._relations.append(
+                        Relation(
+                            kind=RelationKind.CALLED_BY,
+                            from_id=local_sym.id,
+                            to_id=enclosure.id,
+                            location=loc,
+                        )
+                    )
+                    self._relations.append(
+                        Relation(
+                            kind=RelationKind.CALLS,
+                            from_id=enclosure.id,
+                            to_id=local_sym.id,
+                            location=loc,
+                        )
+                    )
+                    continue
+
+                target = self._by_scip_file.get((occ.symbol, rel))
+                if target is None:
+                    target = self._ensure_symbol(
+                        occ.symbol,
+                        rel=rel,
+                        line=line,
+                        language=language,
+                        symbols=symbols,
+                    )
+                if target.kind == SymbolKind.PARAMETER:
+                    continue
+                if target.qualname.startswith("local "):
+                    continue
+
                 self._relations.append(
                     Relation(
                         kind=RelationKind.REFERENCED_BY,
@@ -434,7 +589,10 @@ class ScipProvider(GraphProvider):
                     continue
                 line_text = self._line_text(root, rel, line)
                 if not _looks_like_call(line_text, target.name):
-                    continue
+                    # Alias calls: SCIP may resolve to ``main`` while source says ``cli_main()``.
+                    call_name = _call_name_on_line(line_text)
+                    if not call_name or not _looks_like_call(line_text, call_name):
+                        continue
 
                 self._relations.append(
                     Relation(

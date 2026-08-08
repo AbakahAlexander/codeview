@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from codeview.detect import (
 )
 from codeview.entrypoints import detect_and_resolve, symbols_from_entries
 from codeview.fsutil import browse, count_source_files
-from codeview.models import EntryPoint, IndexStats, RelationKind, Symbol, SymbolKind
+from codeview.models import EntryPoint, IndexStats, Location, RelationKind, Symbol, SymbolKind
 from codeview.paths import indexes_dir, scip_cache_dir
 from codeview.providers import get_provider
 from codeview.providers.scip import find_scip_index
@@ -22,7 +23,7 @@ from codeview.store import SymbolStore
 
 
 # Bump when SCIP→SQLite mapping / call-edge rules change so stale DBs rebuild.
-GRAPH_SCHEMA_VERSION = "6"
+GRAPH_SCHEMA_VERSION = "9"
 
 LAZY_KINDS = (
     RelationKind.CALLS,
@@ -30,6 +31,77 @@ LAZY_KINDS = (
     RelationKind.REFERENCES,
     RelationKind.REFERENCED_BY,
 )
+
+_MAX_BODY_LINES = 400
+_BRACE_LANGS = frozenset(
+    {
+        "c",
+        "cc",
+        "cpp",
+        "cxx",
+        "h",
+        "hpp",
+        "java",
+        "javascript",
+        "js",
+        "typescript",
+        "ts",
+        "tsx",
+        "jsx",
+        "go",
+        "rust",
+        "rs",
+        "cs",
+        "kotlin",
+        "scala",
+    }
+)
+
+
+def _indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _callable_body_end(lines: list[str], start: int, language: str | None) -> int:
+    """Return 1-based end line of a definition that starts at ``start``."""
+    idx = start - 1
+    if idx < 0 or idx >= len(lines):
+        return start
+    lang = (language or "").lower()
+    if lang in _BRACE_LANGS:
+        return _brace_body_end(lines, idx) + 1
+    return _indent_body_end(lines, idx) + 1
+
+
+def _indent_body_end(lines: list[str], start_idx: int) -> int:
+    base = _indent_width(lines[start_idx])
+    last_content = start_idx
+    for j in range(start_idx + 1, len(lines)):
+        raw = lines[j]
+        if not raw.strip():
+            continue
+        if _indent_width(raw) > base:
+            last_content = j
+            continue
+        # Same-or-dedent non-empty line: body ended at the last nested line.
+        return last_content
+    return last_content
+
+
+def _brace_body_end(lines: list[str], start_idx: int) -> int:
+    depth = 0
+    seen = False
+    for j in range(start_idx, len(lines)):
+        for ch in lines[j]:
+            if ch == "{":
+                depth += 1
+                seen = True
+            elif ch == "}" and seen:
+                depth -= 1
+                if depth == 0:
+                    return j
+    # No braces (e.g. one-liners): keep a small window.
+    return min(len(lines) - 1, start_idx + 40)
 
 
 def default_db_path(root: Path) -> Path:
@@ -451,6 +523,7 @@ class ExplorerService:
     def _synthetic_file_contains(
         self, symbol: Symbol, *, limit: int = 80
     ) -> tuple[list[dict], int]:
+        """Symbols defined in a file, or call/use targets for thin ``__main__`` scripts."""
         store = self.ensure_store()
         kids = [
             s
@@ -466,6 +539,51 @@ class ExplorerService:
             }
             and s.signature != "external"
         ]
+        if not kids:
+            # e.g. ``__main__.py`` that only calls ``main`` — SCIP has no local defs.
+            seen: set[str] = set()
+            for kind in (RelationKind.CALLS, RelationKind.REFERENCES):
+                enriched_rel, _total = store.relations_enriched(
+                    symbol.id, kind, limit=max(limit * 2, 40)
+                )
+                for rel in enriched_rel:
+                    target = rel.get("to_symbol") or {}
+                    tid = target.get("id")
+                    if not tid or tid in seen or tid == symbol.id:
+                        continue
+                    if target.get("kind") not in {
+                        "function",
+                        "method",
+                        "class",
+                        "interface",
+                    }:
+                        continue
+                    if target.get("signature") in {"external", "file"}:
+                        continue
+                    seen.add(tid)
+                    kids.append(
+                        Symbol(
+                            id=tid,
+                            name=target["name"],
+                            kind=SymbolKind(target["kind"]),
+                            location=Location(
+                                path=target["location"]["path"],
+                                line=target["location"]["line"],
+                                column=target["location"].get("column", 0),
+                                end_line=target["location"].get("end_line"),
+                                end_column=target["location"].get("end_column"),
+                            ),
+                            qualname=target.get("qualname") or target["name"],
+                            language=target.get("language") or symbol.language,
+                            signature=target.get("signature"),
+                            docstring=target.get("docstring"),
+                            container_id=target.get("container_id"),
+                        )
+                    )
+                    if len(kids) >= limit:
+                        break
+                if len(kids) >= limit:
+                    break
         enriched = [
             {
                 "kind": RelationKind.CONTAINS.value,
@@ -513,18 +631,141 @@ class ExplorerService:
         focus_line: int | None = None,
         focus_path: str | None = None,
         context_lines: int = 12,
+        span: str | None = None,
     ):
-        """Return source around a symbol, or around an explicit call-site line."""
+        """Return source around a symbol, a focus line, or a full callable body.
+
+        ``span="body"`` returns the enclosing definition body for callables
+        (function/method/class), highlighting ``focus_line`` when provided.
+        """
         store = self.ensure_store()
         symbol = store.get_symbol(symbol_id)
         if not symbol:
             raise KeyError(f"Unknown symbol: {symbol_id}")
         root = Path(store.get_meta("root") or ".")
+        if span == "body":
+            return self._snippet_body(
+                root,
+                symbol,
+                highlight_line=focus_line,
+                focus_path=focus_path,
+            )
         if focus_line is not None and focus_line > 0:
             rel = focus_path or symbol.location.path
             return self._snippet_at(root, rel, focus_line, context_lines=context_lines)
         provider = self.provider_for_symbol(symbol)
         return provider.source_for(root, symbol, context_lines=context_lines)
+
+    def _snippet_body(
+        self,
+        root: Path,
+        symbol: Symbol,
+        *,
+        highlight_line: int | None = None,
+        focus_path: str | None = None,
+    ):
+        from codeview.models import SourceSnippet
+
+        # Call-site mode: relation path/line wins over the caller's canonical
+        # definition file (C ``main`` is often collapsed across TUs).
+        rel = focus_path or symbol.location.path
+        if (
+            focus_path
+            and highlight_line
+            and highlight_line > 0
+            and focus_path != symbol.location.path
+        ):
+            return self._snippet_enclosing_at(
+                root, focus_path, highlight_line, language=symbol.language
+            )
+
+        path = root / rel
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return SourceSnippet(path=rel, start_line=1, end_line=1, text="", highlight_line=1)
+        lines = text.splitlines()
+        if not lines:
+            return SourceSnippet(path=rel, start_line=1, end_line=1, text="", highlight_line=1)
+
+        # Modules / directories: window around the call, not the whole file.
+        if symbol.kind not in {
+            SymbolKind.FUNCTION,
+            SymbolKind.METHOD,
+            SymbolKind.CLASS,
+        }:
+            focus = highlight_line or symbol.location.line
+            return self._snippet_at(root, focus_path or rel, focus, context_lines=12)
+
+        start = max(1, min(symbol.location.line, len(lines)))
+        end = _callable_body_end(lines, start, symbol.language)
+        if end - start + 1 > _MAX_BODY_LINES:
+            end = start + _MAX_BODY_LINES - 1
+        hl = highlight_line if highlight_line and highlight_line > 0 else start
+        hl = min(max(1, hl), len(lines))
+        if hl < start:
+            start = hl
+        if hl > end:
+            end = min(len(lines), hl)
+        return SourceSnippet(
+            path=rel,
+            start_line=start,
+            end_line=end,
+            text="\n".join(lines[start - 1 : end]),
+            highlight_line=hl,
+        )
+
+    def _snippet_enclosing_at(
+        self,
+        root: Path,
+        rel: str,
+        focus_line: int,
+        *,
+        language: str | None,
+    ):
+        """Body of the callable that encloses ``focus_line`` in ``rel``."""
+        from codeview.models import SourceSnippet
+
+        path = root / rel
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return SourceSnippet(path=rel, start_line=1, end_line=1, text="", highlight_line=1)
+        lines = text.splitlines()
+        if not lines:
+            return SourceSnippet(path=rel, start_line=1, end_line=1, text="", highlight_line=1)
+        focus = min(max(1, focus_line), len(lines))
+        start = focus
+        # Walk up to a line that looks like a definition / lower indent.
+        for i in range(focus - 1, -1, -1):
+            raw = lines[i]
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            if re.search(
+                r"\b(def|class|function|fn|func|int|void|static|async)\b", stripped
+            ) or re.match(r"^[A-Za-z_].*\{?\s*$", stripped):
+                # Prefer the nearest prior line with <= indent of the call.
+                if _indent_width(raw) <= _indent_width(lines[focus - 1]):
+                    start = i + 1
+                    break
+            if _indent_width(raw) < _indent_width(lines[focus - 1]) and (
+                stripped.endswith("{") or stripped.endswith(":") or "(" in stripped
+            ):
+                start = i + 1
+                break
+        end = _callable_body_end(lines, start, language)
+        if end - start + 1 > _MAX_BODY_LINES:
+            end = start + _MAX_BODY_LINES - 1
+        if focus > end:
+            end = min(len(lines), focus)
+        return SourceSnippet(
+            path=rel,
+            start_line=start,
+            end_line=end,
+            text="\n".join(lines[start - 1 : end]),
+            highlight_line=focus,
+        )
 
     @staticmethod
     def _snippet_at(

@@ -21,7 +21,11 @@ def resolve_entry_points(
     *,
     limit: int = 40,
 ) -> list[EntryPoint]:
-    """Resolve candidates to ``EntryPoint`` records (with symbols when possible)."""
+    """Resolve packaging/bootstrap candidates to SCIP symbols.
+
+    Does not invent hubs or filter trees. Callers/callees come from SCIP when
+    the user expands a root.
+    """
     resolved: list[EntryPoint] = []
     seen_symbols: set[str] = set()
 
@@ -35,30 +39,14 @@ def resolve_entry_points(
         resolved.append(ep)
 
     for cand in candidates:
-        if cand.category == EntryPointKind.LIBRARY and cand.path and not cand.attr:
-            # JVM API tree marker — expand via store query below if nothing else resolves.
+        if cand.category == EntryPointKind.LIBRARY:
             continue
 
         primary = _resolve_candidate_symbol(store, cand)
         if primary:
             add_entry(_to_entry(cand, primary))
-            if cand.prefer_imports and primary.kind == SymbolKind.MODULE:
-                for imported in _entry_file_imports(store, primary, limit=5):
-                    add_entry(
-                        EntryPoint(
-                            category=EntryPointKind.FRONTEND,
-                            display_name=imported.name,
-                            source="import from entry file",
-                            confidence=Confidence.LIKELY,
-                            symbol_id=imported.id,
-                            target=imported.location.path,
-                            evidence=[*cand.evidence, f"referenced from {cand.path}"],
-                            symbol=imported,
-                        )
-                    )
             continue
 
-        # Unresolved file still recorded without symbol (tests / diagnostics).
         add_entry(
             EntryPoint(
                 category=cand.category,
@@ -72,38 +60,49 @@ def resolve_entry_points(
             )
         )
 
-    if not any(ep.symbol_id for ep in resolved):
-        for sym in _native_main_symbols(store, limit=limit):
-            add_entry(
-                EntryPoint(
-                    category=EntryPointKind.NATIVE_MAIN,
-                    display_name=sym.name,
-                    source="indexed main()",
-                    confidence=Confidence.CONFIRMED,
-                    symbol_id=sym.id,
-                    target=f"{sym.location.path}:{sym.location.line}",
-                    evidence=[sym.location.path],
-                    symbol=sym,
-                )
+    # Indexed C/C++/JVM mains (per-file). Always merge — packaging scripts alone
+    # must not hide ``src/server.c`` / ``main.c`` in Makefile-based projects.
+    for sym in _native_main_symbols(store, limit=limit):
+        add_entry(
+            EntryPoint(
+                category=EntryPointKind.NATIVE_MAIN,
+                display_name=sym.name,
+                source="indexed main()",
+                confidence=Confidence.CONFIRMED,
+                symbol_id=sym.id,
+                target=f"{sym.location.path}:{sym.location.line}",
+                evidence=[sym.location.path],
+                symbol=sym,
             )
-        if not any(ep.symbol_id for ep in resolved):
-            for sym in _library_api_symbols(store, limit=limit):
-                add_entry(
-                    EntryPoint(
-                        category=EntryPointKind.LIBRARY,
-                        display_name=sym.name,
-                        source="JVM public API type",
-                        confidence=Confidence.LIKELY,
-                        symbol_id=sym.id,
-                        target=sym.location.path,
-                        evidence=[sym.location.path],
-                        symbol=sym,
-                    )
-                )
+        )
 
-    # Drop unresolved placeholders from the UI list when we have real symbols.
     with_symbols = [ep for ep in resolved if ep.symbol_id and ep.symbol]
+    # Prefer native/src mains ahead of incidental script MODULE entries.
+    with_symbols.sort(key=_entry_display_rank)
     return (with_symbols or resolved)[:limit]
+
+
+def _entry_display_rank(ep: EntryPoint) -> tuple:
+    path = (
+        ep.symbol.location.path.replace("\\", "/").lstrip("./")
+        if ep.symbol
+        else ""
+    )
+    name = Path(path).name.lower()
+    if (
+        ep.category == EntryPointKind.NATIVE_MAIN
+        and path.startswith(("src/", "lib/"))
+    ):
+        # Primary program entries first (server/main), then other src binaries.
+        tip = 0 if name in {"server.c", "main.c", "main.cpp", "main.cc"} else 1
+        return (0, tip, path)
+    if ep.category in {
+        EntryPointKind.CLI,
+        EntryPointKind.FRONTEND,
+        EntryPointKind.NATIVE_MAIN,
+    }:
+        return (1, 0, path or ep.display_name)
+    return (2, 0, path or ep.display_name)
 
 
 def symbols_from_entries(entries: list[EntryPoint]) -> list[Symbol]:
@@ -129,11 +128,18 @@ def _resolve_candidate_symbol(
 ) -> Symbol | None:
     if cand.module and cand.attr:
         rel = cand.module.replace(".", "/") + ".py"
+        kinds = {
+            SymbolKind.FUNCTION,
+            SymbolKind.METHOD,
+            SymbolKind.CLASS,
+            SymbolKind.INTERFACE,
+        }
         hits = [
             s
-            for s in store.search(cand.attr, limit=30)
+            for s in store.search(cand.attr, limit=40)
             if s.name == cand.attr
-            and s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}
+            and s.kind in kinds
+            and s.signature != "external"
             and (
                 s.location.path == rel
                 or s.location.path.endswith("/" + rel)
@@ -141,10 +147,16 @@ def _resolve_candidate_symbol(
             )
         ]
         if hits:
+            hits.sort(
+                key=lambda s: (
+                    0 if s.location.path.endswith(rel) or s.location.path == rel else 1,
+                    0 if s.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD} else 1,
+                    0 if s.kind in {SymbolKind.CLASS, SymbolKind.INTERFACE} else 1,
+                    s.location.path,
+                )
+            )
             return hits[0]
-        loose = [s for s in store.search(cand.attr, limit=20) if s.name == cand.attr]
-        prefer = [s for s in loose if rel in s.location.path]
-        return (prefer or loose or [None])[0]
+        return None
 
     if not cand.path:
         return None
@@ -206,50 +218,15 @@ def _symbol_for_entry_file(store: SymbolStore, rel: str) -> Symbol | None:
     return syms[0]
 
 
-def _entry_file_imports(
-    store: SymbolStore, module: Symbol, *, limit: int = 5
-) -> list[Symbol]:
-    rows = store._conn.execute(
-        """
-        SELECT s.*
-        FROM relations r
-        JOIN symbols s ON s.id = r.to_id
-        WHERE r.from_id = ?
-          AND r.kind = 'references'
-          AND s.kind IN ('function', 'class', 'interface', 'method')
-          AND (s.signature IS NULL OR s.signature NOT IN ('external', 'file'))
-          AND s.path != ?
-        ORDER BY
-          CASE
-            WHEN s.name IN ('App', 'Main', 'Game', 'Root', 'Index') THEN 0
-            WHEN s.path LIKE 'src/components/%' OR s.path LIKE 'src/pages/%' THEN 1
-            ELSE 2
-          END,
-          s.path,
-          s.line
-        """,
-        (module.id, module.location.path),
-    ).fetchall()
-    out: list[Symbol] = []
-    seen: set[str] = set()
-    for row in rows:
-        sym = store._row_to_symbol(row)
-        if sym.id in seen:
-            continue
-        seen.add(sym.id)
-        out.append(sym)
-        if len(out) >= limit:
-            break
-    return out
-
-
 def _native_main_symbols(store: SymbolStore, *, limit: int = 40) -> list[Symbol]:
     native: list[Symbol] = []
     for name in ("main", "WinMain", "wWinMain"):
-        for sym in store.search(name, limit=80):
+        for sym in store.search(name, limit=200):
             if sym.name != name:
                 continue
             if sym.kind not in {SymbolKind.FUNCTION, SymbolKind.METHOD}:
+                continue
+            if sym.signature in {"external", "unresolved"}:
                 continue
             ext = Path(sym.location.path).suffix.lower()
             if ext in {
@@ -267,14 +244,23 @@ def _native_main_symbols(store: SymbolStore, *, limit: int = 40) -> list[Symbol]
                 ".scala",
             }:
                 native.append(sym)
-    native.sort(
-        key=lambda s: (
-            0 if not s.location.path.replace("\\", "/").startswith("tests/") else 1,
-            0 if "/test/" not in s.location.path.replace("\\", "/").lower() else 1,
-            0 if not s.location.path.replace("\\", "/").startswith("benchmarks/") else 1,
-            s.location.path,
-        )
-    )
+
+    def path_rank(path: str) -> tuple[int, int, str]:
+        p = path.replace("\\", "/").lstrip("./")
+        if p.startswith("src/") or p.startswith("lib/"):
+            rank = 0
+        elif p.startswith("deps/") or "/deps/" in p or p.startswith("third_party/"):
+            rank = 3
+        elif "/test/" in p or p.startswith("tests/") or "/examples/" in p:
+            rank = 2
+        else:
+            rank = 1
+        # Prefer the primary binary entry (server.c / main.c) within a rank.
+        name = Path(p).name.lower()
+        tip = 0 if name in {"server.c", "main.c", "main.cpp", "main.cc"} else 1
+        return (rank, tip, p)
+
+    native.sort(key=lambda s: path_rank(s.location.path))
     seen: set[str] = set()
     out: list[Symbol] = []
     for sym in native:
@@ -285,45 +271,3 @@ def _native_main_symbols(store: SymbolStore, *, limit: int = 40) -> list[Symbol]
         if len(out) >= limit:
             break
     return out
-
-
-def _library_api_symbols(store: SymbolStore, *, limit: int = 40) -> list[Symbol]:
-    rows = store._conn.execute(
-        """
-        SELECT * FROM symbols
-        WHERE kind IN ('class', 'interface')
-          AND (
-            path LIKE '%/api/src/main/java/%'
-            OR path LIKE '%/api/src/main/kotlin/%'
-            OR path LIKE 'api/src/main/java/%'
-            OR path LIKE 'src/main/java/%'
-            OR path LIKE 'lib/src/main/java/%'
-          )
-          AND path NOT LIKE '%/test/%'
-          AND path NOT LIKE '%/tests/%'
-        ORDER BY
-          CASE
-            WHEN path LIKE '%/api/src/main/%' OR path LIKE 'api/src/main/%' THEN 0
-            ELSE 1
-          END,
-          length(path),
-          name
-        LIMIT ?
-        """,
-        (max(limit * 8, 80),),
-    ).fetchall()
-    primary: list[Symbol] = []
-    seen_paths: set[str] = set()
-    fallback: list[Symbol] = []
-    for row in rows:
-        sym = store._row_to_symbol(row)
-        stem = Path(sym.location.path).stem
-        if sym.name == stem and sym.location.path not in seen_paths:
-            seen_paths.add(sym.location.path)
-            primary.append(sym)
-        elif sym.location.path not in seen_paths:
-            fallback.append(sym)
-    out = primary + [
-        s for s in fallback if s.location.path not in {p.location.path for p in primary}
-    ]
-    return out[:limit]

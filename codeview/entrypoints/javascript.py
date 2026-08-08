@@ -196,17 +196,6 @@ class JavaScriptEntryDetector:
                     prefer_imports=True,
                 )
 
-        # 5) package exports — library surface only when nothing else matched.
-        if not out and data.get("exports") is not None:
-            for export_path in _package_export_paths(data.get("exports")):
-                add(
-                    export_path,
-                    category=EntryPointKind.LIBRARY,
-                    source="package.json exports",
-                    confidence=Confidence.LIKELY,
-                    evidence=f"exports → {export_path}",
-                )
-
         return out[:limit]
 
 
@@ -256,34 +245,3 @@ def resolve_js_source_path(root: Path, raw: str) -> str | None:
             continue
         return rel_posix
     return None
-
-
-def _package_export_paths(exports: object) -> list[str]:
-    out: list[str] = []
-
-    def walk(node: object, *, prefer_dot: bool = False) -> None:
-        if isinstance(node, str):
-            if not node.startswith(".") and "/" not in node and not node.endswith("*"):
-                return
-            out.append(node)
-            return
-        if isinstance(node, list):
-            for item in node:
-                walk(item)
-            return
-        if not isinstance(node, dict):
-            return
-        if prefer_dot and "." in node:
-            walk(node["."])
-            return
-        for key in (".", "import", "require", "default", "node", "browser"):
-            if key in node:
-                walk(node[key])
-        for key, val in node.items():
-            if key in {".", "import", "require", "default", "node", "browser", "types"}:
-                continue
-            if isinstance(key, str) and key.startswith("./") and not key.endswith("*"):
-                walk(val)
-
-    walk(exports, prefer_dot=True)
-    return out

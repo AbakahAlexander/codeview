@@ -80,6 +80,14 @@ body {
   border: 1px solid #ddd;
   background: #fafafa;
 }
+#srcCallBlock:not([hidden]) {
+  border-color: #c9842a;
+}
+#srcCallBlock:not([hidden]) .src-label {
+  background: #fff4e0;
+  color: #6a3f00;
+  font-weight: 600;
+}
 .src-label {
   padding: 4px 8px;
   border-bottom: 1px solid #ddd;

@@ -81,6 +81,7 @@ function pushHistory(symbol) {
     peer_id: symbol.peer_id || null,
     peer_name: symbol.peer_name || null,
     def_location: symbol.def_location || null,
+    signature: symbol.signature || null,
   };
   state.history = state.history.slice(0, state.historyIndex + 1);
   const cur = state.history[state.historyIndex];
@@ -122,50 +123,150 @@ async function selectSymbol(symbol, record = true) {
     return;
   }
 
-  // Call edges: show the call site plus the other related definition so you
-  // can see how the two sides interact (e.g. build_parser header + the call).
-  if (symbol.call_site && symbol.location && symbol.location.line && symbol.peer_id) {
-    const callQs = new URLSearchParams({
-      line: String(symbol.location.line),
-      path: symbol.location.path || "",
-    });
-    // For callees of P: caller=P, callee=row. For callers of P: caller=row, callee=P.
+  // Call edges: full caller body (highlight call line) + callee definition.
+  // edge "calls": clicked = callee, peer = caller
+  // edge "called_by": clicked = caller, peer = callee
+  const defLoc = symbol.def_location || null;
+  const loc = symbol.location || {};
+  if (
+    loc.line &&
+    symbol.call_site &&
+    symbol.peer_id &&
+    (symbol.edge === "calls" || symbol.edge === "called_by")
+  ) {
+    const callLine = loc.line;
+    const callPath = loc.path || "";
     const callerId = symbol.edge === "called_by" ? symbol.id : symbol.peer_id;
     const calleeId = symbol.edge === "called_by" ? symbol.peer_id : symbol.id;
-    const [callSnippet, callerSnippet, calleeSnippet] = await Promise.all([
-      api(`/api/source/${symbol.id}?${callQs.toString()}`),
-      api(`/api/source/${callerId}`),
-      api(`/api/source/${calleeId}`),
-    ]);
-    const callFocus = callSnippet.highlight_line || symbol.location.line;
-    // If the caller's def is already in the call-site window (e.g. main right
-    // above parser = build_parser()), show the callee. Otherwise show the
-    // caller so a far-away def like build_parser at :15 pairs with a call at :65.
-    const callerVisible = snippetContains(
-      callSnippet,
-      callerSnippet.path,
-      callerSnippet.highlight_line
-    );
-    const peerSnippet = callerVisible ? calleeSnippet : callerSnippet;
-    // Prefer plain "definition" — "callee/caller" is confusing when browsing
-    // a callers list (the related pane is usually the method you started from).
-    const peerLabel = callerVisible ? "definition" : "caller definition";
-    const peerFocus = peerSnippet.highlight_line;
-    els.srcMeta.textContent = `${callSnippet.path}:${callFocus} ↔ ${peerSnippet.path}:${peerFocus}`;
-    els.srcCallBlock.hidden = false;
-    els.srcCallLabel.textContent = `call site · ${callSnippet.path}:${callFocus}`;
-    els.srcDefLabel.textContent = `${peerLabel} · ${peerSnippet.path}:${peerFocus}`;
-    renderSnippet(els.srcCall, callSnippet);
-    renderSnippet(els.srcDef, peerSnippet);
-    return;
+    const calleeName =
+      symbol.edge === "calls" ? symbol.name : symbol.peer_name || "symbol";
+    try {
+      const callQs = new URLSearchParams({
+        line: String(callLine),
+        path: callPath,
+        span: "body",
+      });
+      const callSnippet = await api(`/api/source/${callerId}?${callQs}`);
+      const callFocus = callSnippet.highlight_line || callLine;
+      els.srcCallBlock.hidden = false;
+      els.srcCallLabel.textContent = `call site · ${callSnippet.path}:${callFocus}`;
+      renderSnippet(els.srcCall, callSnippet);
+
+      let calleeMeta = null;
+      try {
+        calleeMeta = (await api(`/api/symbol/${calleeId}`)).symbol;
+      } catch (_) {
+        calleeMeta = null;
+      }
+      const calleeSig =
+        (symbol.edge === "calls" ? symbol.signature : null) ||
+        (calleeMeta && calleeMeta.signature) ||
+        null;
+      const bindLoc =
+        (symbol.edge === "calls" && defLoc) ||
+        (calleeMeta && calleeMeta.location) ||
+        null;
+      const bindDiffers =
+        !!(
+          bindLoc &&
+          bindLoc.line &&
+          (bindLoc.path !== callPath || bindLoc.line !== callLine)
+        );
+      const unresolved = calleeSig === "unresolved" || calleeSig === "external";
+
+      if (unresolved) {
+        await renderMissingDefinition(calleeName, calleeSig, {
+          callPath,
+          callFocus,
+          // Only show a binding line when it is not the call site itself.
+          bindLoc: bindDiffers ? bindLoc : null,
+          calleeId,
+        });
+        return;
+      }
+
+      const defSnippet = await api(`/api/source/${calleeId}?span=body`);
+      const defFocus = defSnippet.highlight_line || bindLoc.line || defSnippet.start_line;
+      // Guard: never show the call site again as if it were the definition.
+      if (
+        defSnippet.path === callSnippet.path &&
+        (defSnippet.highlight_line || defSnippet.start_line) === callFocus
+      ) {
+        await renderMissingDefinition(calleeName, calleeSig || "unresolved", {
+          callPath,
+          callFocus,
+          bindLoc: null,
+          calleeId,
+        });
+        return;
+      }
+      els.srcDefLabel.textContent = `definition · ${defSnippet.path}:${defFocus}`;
+      renderSnippet(els.srcDef, defSnippet);
+      els.srcMeta.textContent = `${callSnippet.path}:${callFocus} ↔ ${defSnippet.path}:${defFocus}`;
+      return;
+    } catch (_) {
+      // fall through to single-pane definition
+    }
   }
 
-  const snippet = await api(`/api/source/${symbol.id}`);
-  const focus = snippet.highlight_line || symbol.location.line;
+  // Prefer the real definition location when the row carries a call-site path.
+  const defQs =
+    defLoc && defLoc.line
+      ? `?line=${encodeURIComponent(defLoc.line)}&path=${encodeURIComponent(defLoc.path || "")}`
+      : "";
+  const snippet = await api(`/api/source/${symbol.id}${defQs}`);
+  const focus = snippet.highlight_line || (defLoc && defLoc.line) || loc.line;
+  const sig = symbol.signature;
+  if (sig === "unresolved" || sig === "external") {
+    els.srcCallBlock.hidden = true;
+    await renderMissingDefinition(symbol.name, sig, {
+      callPath: loc.path || "",
+      callFocus: focus,
+      bindLoc: defLoc && defLoc.line && (defLoc.path !== loc.path || defLoc.line !== loc.line) ? defLoc : null,
+      calleeId: symbol.id,
+    });
+    return;
+  }
   els.srcMeta.textContent = `${snippet.path}:${focus} · ${snippet.start_line}-${snippet.end_line}`;
   els.srcCallBlock.hidden = true;
   els.srcDefLabel.textContent = `definition · ${snippet.path}:${focus}`;
   renderSnippet(els.srcDef, snippet);
+}
+
+async function renderMissingDefinition(name, signature, { callPath, callFocus, bindLoc, calleeId }) {
+  const kind =
+    signature === "external"
+      ? "external (dependency / stdlib)"
+      : signature === "unresolved"
+        ? "unresolved"
+        : "not found in this repository";
+  els.srcDefLabel.textContent = `definition · ${kind}`;
+  els.srcMeta.textContent = `${callPath}:${callFocus} ↔ (no local definition)`;
+
+  let bindText = "";
+  if (bindLoc && bindLoc.line && calleeId) {
+    try {
+      const bindQs = new URLSearchParams({
+        line: String(bindLoc.line),
+        path: bindLoc.path || "",
+        context: "0",
+      });
+      const bindSnippet = await api(`/api/source/${calleeId}?${bindQs}`);
+      const line = (bindSnippet.text || "").trim();
+      if (line) {
+        bindText =
+          `Local binding / import (${bindLoc.path}:${bindLoc.line}):\n` +
+          `  ${line}\n\n`;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  els.srcDef.textContent =
+    bindText +
+    `${name} has no definition body in this repository.\n` +
+    `It is ${kind}. Only the call site is available locally.`;
 }
 
 function symbolButton(symbol) {
@@ -246,15 +347,13 @@ async function loadBranches(symbol, container, ancestors = []) {
   container.innerHTML = "";
   const blocked = new Set(ancestors);
 
-  // File modules: SCIP often has references/imports but empty contains/calls
-  // (typical for JS/TS bootstraps like main.tsx → <Game />).
+  // File modules (``__main__.py``, etc.): callers/callees only — "symbols"/"uses"
+  // duplicate the same call/import targets and bury the call graph.
   const kinds =
     symbol.kind === "module" && symbol.signature === "file"
       ? [
-          { kind: "contains", label: "symbols" },
-          { kind: "references", label: "uses" },
-          { kind: "calls", label: "callees" },
           { kind: "called_by", label: "callers" },
+          { kind: "calls", label: "callees" },
         ]
       : BRANCHES;
 
@@ -288,10 +387,11 @@ async function loadBranches(symbol, container, ancestors = []) {
               peer_name: symbol.name,
               def_location: s.location,
               location: {
-                ...s.location,
                 path: site.path || s.location.path,
                 line: site.line,
                 column: site.column ?? 0,
+                end_line: s.location.end_line ?? null,
+                end_column: s.location.end_column ?? null,
               },
             }
           : s;
@@ -457,6 +557,7 @@ async function init() {
           peer_id: step.peer_id,
           peer_name: step.peer_name,
           def_location: step.def_location || data.symbol.location,
+          signature: step.signature || data.symbol.signature,
           location: {
             ...data.symbol.location,
             path: step.path,

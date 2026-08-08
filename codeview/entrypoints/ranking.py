@@ -5,6 +5,8 @@ from __future__ import annotations
 from codeview.entrypoints.models import EntryPointCandidate
 from codeview.models import Confidence, EntryPointKind
 
+# Prefer runnable roots. LIBRARY export surfaces are not entry points — those
+# symbols are reached by expanding callers/callees from real roots.
 _CATEGORY_RANK = {
     EntryPointKind.CLI: 0,
     EntryPointKind.FRONTEND: 1,
@@ -24,11 +26,13 @@ _CONFIDENCE_RANK = {
 def rank_candidates(
     candidates: list[EntryPointCandidate], *, limit: int = 40
 ) -> list[EntryPointCandidate]:
-    """Stable dedupe by path/module target, prefer higher-confidence / stronger categories."""
+    """Stable dedupe by path/module target; drop LIBRARY export lists only."""
     best: dict[str, EntryPointCandidate] = {}
     order: list[str] = []
 
     for cand in candidates:
+        if cand.category == EntryPointKind.LIBRARY:
+            continue
         key = _candidate_key(cand)
         prev = best.get(key)
         if prev is None:
@@ -46,10 +50,12 @@ def rank_candidates(
 
 
 def _candidate_key(cand: EntryPointCandidate) -> str:
-    if cand.path:
-        return f"path:{cand.path}"
     if cand.module and cand.attr:
         return f"mod:{cand.module}:{cand.attr}"
+    if cand.path and cand.attr:
+        return f"path:{cand.path}:{cand.attr}"
+    if cand.path:
+        return f"path:{cand.path}"
     if cand.module:
         return f"mod:{cand.module}"
     return f"name:{cand.display_name}:{cand.source}"

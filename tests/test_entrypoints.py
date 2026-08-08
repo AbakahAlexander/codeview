@@ -37,6 +37,8 @@ def test_python_cli_scripts():
         for c in cands
     )
     assert any(c.path == "pkg/cli.py" for c in cands)
+    # Public re-exports are not entry points — reach them via calls/refs.
+    assert not any(c.category == EntryPointKind.LIBRARY for c in cands)
 
 
 def test_python_fastapi_main_guard():
@@ -47,6 +49,20 @@ def test_python_fastapi_main_guard():
     hit = next(c for c in cands if c.path == "app/main.py")
     assert hit.source == "__main__ guard"
     assert hit.attr == "main"
+    assert not any(c.category == EntryPointKind.LIBRARY for c in cands)
+
+
+def test_dunder_main_not_skipped_under_dot_parent(tmp_path: Path):
+    """Repos under ``~/.codeview/repos/...`` must still see ``__main__.py``."""
+    from codeview.entrypoints.python import find_dunder_main_files
+
+    root = tmp_path / ".codeview" / "repos" / "demo"
+    pkg = root / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__main__.py").write_text("from .cli import main\nmain()\n", encoding="utf-8")
+    (pkg / "cli.py").write_text("def main():\n    pass\n", encoding="utf-8")
+    found = find_dunder_main_files(root)
+    assert "pkg/__main__.py" in found
 
 
 def test_react_vite_html_not_app_tsx():
@@ -72,16 +88,17 @@ def test_node_cli_bin_not_exports():
     cands = detect_candidates(root)
     paths = _paths(cands)
     assert "src/cli.ts" in paths
-    assert "src/lib.ts" not in paths  # exports ignored when bin exists
+    assert "src/lib.ts" not in paths  # package exports are not entry points
     assert any(c.category == EntryPointKind.CLI and c.display_name == "widget" for c in cands)
+    assert not any(c.category == EntryPointKind.LIBRARY for c in cands)
 
 
-def test_java_gradle_api_tree():
+def test_java_gradle_no_library_api_as_entry():
+    """Pure JVM libraries have no execution root — don't invent API-class entries."""
     root = FIXTURES / "java_gradle"
     cands = detect_candidates(root)
-    assert any(
-        c.category == EntryPointKind.LIBRARY and c.path == "api/src/main/java" for c in cands
-    )
+    assert not any(c.category == EntryPointKind.LIBRARY for c in cands)
+    assert not any(c.path and "Schema" in c.path for c in cands)
 
 
 def test_cpp_cmake_executable():
@@ -103,8 +120,12 @@ def test_mixed_monorepo_workspace_packages():
     assert any(c.command_name == "api" and c.module == "api.app" for c in cands)
 
 
-def test_resolve_pipeline_maps_file_and_imports(tmp_path: Path):
-    """repository → detection → SCIP symbol mapping → entry symbols."""
+def test_resolve_pipeline_maps_execution_root_only(tmp_path: Path):
+    """repository → detection → SCIP symbol mapping → entry symbols.
+
+    Imports from the entry file are not promoted to entry points; they belong
+    in the call/ref graph when the entry is expanded.
+    """
     root = FIXTURES / "react_vite"
     db = tmp_path / "test.sqlite3"
     store = SymbolStore(db)
@@ -145,7 +166,8 @@ def test_resolve_pipeline_maps_file_and_imports(tmp_path: Path):
     symbols = symbols_from_entries(entries)
     names = {s.name for s in symbols}
     assert "main.tsx" in names
-    assert "App" in names
+    assert "App" not in names
+    assert all(e.category != EntryPointKind.LIBRARY for e in entries)
     assert all(e.evidence for e in entries if e.symbol_id)
 
 

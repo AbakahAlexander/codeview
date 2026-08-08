@@ -49,6 +49,18 @@ class SavePathRequest(BaseModel):
     steps: list[dict] = Field(default_factory=list)
 
 
+def _asset_version() -> str:
+    """Cache-bust static assets from file mtimes so UI fixes show up without hard refresh."""
+    try:
+        times = [
+            (STATIC_DIR / "app.js").stat().st_mtime_ns,
+            (STATIC_DIR / "styles.css").stat().st_mtime_ns,
+        ]
+        return str(max(times))
+    except OSError:
+        return "1"
+
+
 def create_app(service: ExplorerService | None = None) -> FastAPI:
     service = service or ExplorerService()
     app = FastAPI(title="Codeview", version="0.1.0")
@@ -57,6 +69,7 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def home() -> HTMLResponse:
         html = (TEMPLATE_DIR / "index.html").read_text(encoding="utf-8")
+        html = html.replace("{{ASSET_V}}", _asset_version())
         return HTMLResponse(html)
 
     @app.get("/api/health")
@@ -241,6 +254,8 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
         symbol_id: str,
         line: int | None = None,
         path: str | None = None,
+        context: int | None = None,
+        span: str | None = None,
     ) -> dict:
         if not service.store:
             raise HTTPException(status_code=400, detail="No index loaded")
@@ -249,6 +264,8 @@ def create_app(service: ExplorerService | None = None) -> FastAPI:
                 symbol_id,
                 focus_line=line,
                 focus_path=path,
+                context_lines=12 if context is None else max(0, min(int(context), 40)),
+                span=span if span in {None, "body"} else None,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
