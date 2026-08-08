@@ -109,7 +109,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "doctor":
         if args.purge:
-            result = purge_codeview_data()
+            try:
+                result = purge_codeview_data()
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
             print(json.dumps(result, indent=2))
             return 0
         from codeview.rgutil import ensure_rg

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import shutil
+import stat
+import sys
 from pathlib import Path
 
 
@@ -37,19 +41,73 @@ def is_ephemeral_clone(root: Path) -> bool:
     """True when ``root`` lives under ``~/.codeview/repos/`` (git URL peek)."""
     try:
         root.resolve().relative_to(repos_dir().resolve())
-        return True
     except (ValueError, OSError):
         return False
+    return True
+
+
+def _clear_readonly(path: str) -> None:
+    """Clear the Windows read-only bit (and any missing write bit) so unlink can succeed."""
+    try:
+        mode = os.stat(path).st_mode
+        os.chmod(path, mode | stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
+
+
+def _rmtree_error(func, path: str, exc: BaseException) -> None:
+    """``shutil.rmtree`` callback: clear read-only and retry; re-raise if still blocked."""
+    winerror = getattr(exc, "winerror", None)
+    err_no = getattr(exc, "errno", None)
+    access_denied = (
+        isinstance(exc, PermissionError)
+        or winerror == 5
+        or err_no in {errno.EACCES, errno.EPERM}
+    )
+    if access_denied:
+        _clear_readonly(path)
+        try:
+            func(path)
+            return
+        except OSError as retry_exc:
+            raise RuntimeError(
+                f"Could not delete {path}: {retry_exc}. "
+                "Close any running codeview serve (and other programs using "
+                "~/.codeview), then retry doctor --purge."
+            ) from retry_exc
+    raise exc
+
+
+def rmtree_force(path: Path) -> None:
+    """Delete a file or directory tree, clearing read-only bits (Windows git packs)."""
+    if not path.exists():
+        return
+    if path.is_file() or path.is_symlink():
+        try:
+            path.unlink()
+        except OSError:
+            _clear_readonly(str(path))
+            path.unlink()
+        return
+
+    def onexc(func, p, exc):
+        _rmtree_error(func, p, exc)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=onexc)
+    else:
+
+        def onerror(func, p, exc_info):
+            _rmtree_error(func, p, exc_info[1])
+
+        shutil.rmtree(path, onerror=onerror)
 
 
 def _rm_tree(path: Path, removed: list[str]) -> None:
     if not path.exists():
         return
     try:
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+        rmtree_force(path)
         removed.append(str(path))
     except OSError:
         pass
@@ -84,7 +142,7 @@ def purge_codeview_data() -> dict[str, object]:
                     size_hint += path.stat().st_size
                 except OSError:
                     pass
-        shutil.rmtree(home)
+        rmtree_force(home)
     return {
         "purged": True,
         "path": str(home),
